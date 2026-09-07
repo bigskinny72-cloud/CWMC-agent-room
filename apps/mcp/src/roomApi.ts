@@ -135,14 +135,13 @@ export async function joinRoom(
   client: RoomApiClient,
   code: string,
   participant: Participant,
+  // Canonical shared context + policy (PRD §2.6) — the same text hosted
+  // agents get in their system prompt. Present on servers ≥ the parity
+  // release; older servers just omit them.
   options: { hostKey?: string; priorIdentity?: { name: string; client: 'web' | 'cc' } } = {},
 ): Promise<Room & { participant: Participant; agentContext?: string; roomPolicy?: string; policyVersion?: number }> {
-  const body = await client.post<{
-    room: Room;
+  const body = await client.post<Room & {
     participant: Participant;
-    // Canonical shared context + policy (PRD §2.6) — the same text hosted
-    // agents get in their system prompt. Present on servers ≥ the parity
-    // release; older servers just omit them.
     agentContext?: string;
     roomPolicy?: string;
     policyVersion?: number;
@@ -153,13 +152,7 @@ export async function joinRoom(
     hostKey: options.hostKey,
     priorIdentity: options.priorIdentity,
   });
-  return {
-    ...body.room,
-    participant: body.participant,
-    agentContext: body.agentContext,
-    roomPolicy: body.roomPolicy,
-    policyVersion: body.policyVersion,
-  };
+  return body;
 }
 
 export async function listMessages(client: RoomApiClient, code: string, since: number): Promise<Message[]> {

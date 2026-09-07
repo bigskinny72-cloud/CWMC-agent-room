@@ -5,7 +5,7 @@ export const CODE_SEGMENTS = 3;
 export const CODE_LEN = CODE_SEGMENT_LEN * CODE_SEGMENTS;    // 9
 
 // Room lifetime
-export const ROOM_TTL_SECONDS = 24 * 60 * 60;                // 86400
+export const ROOM_TTL_SECONDS = 3153600000; // ~100 years
 
 // Message cap
 export const MAX_MESSAGES_PER_ROOM = 500;
