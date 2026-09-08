@@ -1,14 +1,15 @@
 import type { Message, MessageMetadata, RoleInTurn, InvocationType } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
-import { createUpstashMessageStore } from './messageStore.js';
-import { findSpeaker, MutedError, NotYourTurnError, getRoom } from './rooms.js';
+import type { PersistenceStores } from '@agent-room/persistence';
+import { createUpstashPersistenceStores } from './persistenceStores.js';
+import { findSpeaker, MutedError, NotYourTurnError, getRoomWithStores } from './rooms.js';
 import type { TurnSpokenEntry } from './turnState.js';
 import {
   advanceOnTimeout,
   advanceTurn,
   applyGraceSupplementReply,
   canAgentSpeakNow,
-  casTurnState,
+  casTurnStateWithStores,
   consumeHostDirectedDetailed,
   isGraceSupplementSpeaker,
   isHumanSender,
@@ -32,11 +33,21 @@ import {
 // pipeline as RPUSH/LTRIM so it can never drift relative to the list.
 
 /** Next poll cursor after a full `listMessages(..., 0)` when the room has a counter key; `null` = legacy room. */
+export async function getMessageTotalCountWithStores(
+  stores: PersistenceStores,
+  code: string,
+): Promise<number | null> {
+  return stores.messages.getMessageTotalCount(code);
+}
+
 export async function getMessageTotalCount(
   client: UpstashClient,
   code: string,
 ): Promise<number | null> {
-  return createUpstashMessageStore(client).getMessageTotalCount(code);
+  return getMessageTotalCountWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+  );
 }
 
 // Supplement-skip token. A supplement agent that has nothing to add MUST
@@ -89,13 +100,13 @@ export interface AppendResult {
 //     never advances the turn. In sequential mode, when the sender is the
 //     current speaker, it also renews their turn deadline (heartbeat) — a
 //     long-running agent can signal "still working" without losing the floor.
-export async function appendMessage(
-  client: UpstashClient,
+export async function appendMessageWithStores(
+  stores: PersistenceStores,
   code: string,
   message: Message,
   kind: 'message' | 'status' = 'message',
 ): Promise<AppendResult> {
-  const room = await getRoom(client, code);
+  const room = await getRoomWithStores(stores, code);
   if (!findSpeaker(room, message.name, message.client)) {
     throw new MutedError(message.name, room.createdBy);
   }
@@ -113,7 +124,7 @@ export async function appendMessage(
       invocationType: message.metadata?.invocationType ?? 'normal_turn',
     };
     const enriched: Message = { ...message, metadata };
-    await rpushMessage(client, code, enriched, room.createdAt);
+    await rpushMessageWithStores(stores, code, enriched, room.createdAt);
     return { appended: true, metadata };
   }
 
@@ -137,7 +148,7 @@ export async function appendMessage(
     skipMessage: false,
   };
 
-  await casTurnState(client, code, (prev) => {
+  await casTurnStateWithStores(stores, code, (prev) => {
     // Reset per-attempt decision state so a CAS retry doesn't carry over
     // leadSkipped / extendsTurn from a stale earlier attempt.
     decision.leadSkipped = undefined;
@@ -290,7 +301,7 @@ export async function appendMessage(
     ...(decision.extendsTurn ? { extendsTurn: true } : {}),
   };
   const enriched: Message = { ...message, metadata };
-  await rpushMessage(client, code, enriched, room.createdAt);
+  await rpushMessageWithStores(stores, code, enriched, room.createdAt);
   return {
     appended: true,
     metadata,
@@ -298,6 +309,19 @@ export async function appendMessage(
   };
 }
 
+export async function appendMessage(
+  client: UpstashClient,
+  code: string,
+  message: Message,
+  kind: 'message' | 'status' = 'message',
+): Promise<AppendResult> {
+  return appendMessageWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+    message,
+    kind,
+  );
+}
 // Internal helper: write a message to the Redis list, pinning TTL to the
 // room's hard 24h deadline and keeping the absolute-count counter in lockstep.
 // INCR on the count key MUST sit in the same pipeline as RPUSH so the count
@@ -305,19 +329,18 @@ export async function appendMessage(
 // `totalCount - listLen = number of LTRIMmed entries` to compensate cursors.
 // EXPIREAT (a fixed creation+TTL deadline) rather than EXPIRE means the
 // message list dies exactly when the room does, instead of sliding forward.
-async function rpushMessage(
-  client: UpstashClient,
+async function rpushMessageWithStores(
+  stores: PersistenceStores,
   code: string,
   message: Message,
   roomCreatedAt: number,
 ): Promise<void> {
-  await createUpstashMessageStore(client).appendMessage(
+  await stores.messages.appendMessage(
     code,
     message,
     roomCreatedAt,
   );
 }
-
 // Append a server-originated system message. Bypasses the speaker/mute/turn
 // gates because system messages are not sent by a participant — they are
 // emitted by the server itself in response to events like mode changes,
@@ -325,13 +348,25 @@ async function rpushMessage(
 // set `message.type = 'sys'` and use a synthetic sender (typically
 // `name: 'system'`, `client: 'cc'`). The room must still exist; we hit
 // getRoom() to refresh TTL and keep the count key aligned with the list.
+export async function appendSystemMessageWithStores(
+  stores: PersistenceStores,
+  code: string,
+  message: Message
+): Promise<void> {
+  const room = await getRoomWithStores(stores, code);
+  await rpushMessageWithStores(stores, code, message, room.createdAt);
+}
+
 export async function appendSystemMessage(
   client: UpstashClient,
   code: string,
   message: Message
 ): Promise<void> {
-  const room = await getRoom(client, code); // throws RoomNotFoundError if the room is gone
-  await rpushMessage(client, code, message, room.createdAt);
+  return appendSystemMessageWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+    message,
+  );
 }
 
 // Cursor semantics: `fromIndex` is the absolute count of messages the caller
@@ -340,19 +375,24 @@ export async function appendSystemMessage(
 // LTRIM trims the head, so a list-index cursor would skip messages past
 // MAX_MESSAGES_PER_ROOM. The counter key + LLEN let us reconstruct where the
 // caller's next unread message actually lives in the (possibly trimmed) list.
+export async function listMessagesWithStores(
+  stores: PersistenceStores,
+  code: string,
+  fromIndex: number,
+): Promise<Message[]> {
+  return stores.messages.listMessages(code, fromIndex);
+}
+
 export async function listMessages(
   client: UpstashClient,
   code: string,
   fromIndex: number,
 ): Promise<Message[]> {
-  return createUpstashMessageStore(client).listMessages(
+  return listMessagesWithStores(
+    createUpstashPersistenceStores(client),
     code,
     fromIndex,
   );
 }
-
-
-
-
 
 
