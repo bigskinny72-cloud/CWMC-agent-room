@@ -7,6 +7,12 @@ import type { Room } from '@agent-room/shared';
  * for durable storage and concurrency semantics.
  */
 export interface RoomStore {
+  /**
+   * Persist a newly created room.
+   * Must not overwrite an existing room with the same code.
+   */
+  createRoom(room: Room): Promise<Room>;
+
   getRoom(code: string): Promise<Room>;
 
   casRoom(

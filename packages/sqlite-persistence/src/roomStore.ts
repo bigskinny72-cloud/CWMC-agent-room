@@ -5,6 +5,7 @@ import {
   ConcurrencyError,
   casRoom as casStoredRoom,
   getRoom as getStoredRoom,
+  insertRoom,
 } from './rooms.js';
 
 const CAS_MAX_ATTEMPTS = 3;
@@ -13,12 +14,17 @@ const CAS_MAX_ATTEMPTS = 3;
  * SQLite implementation of the backend-neutral RoomStore contract.
  *
  * Business logic supplies the mutator. This adapter handles:
+ * - create-only room persistence
  * - loading current room state
  * - running the mutator
  * - atomic version-checked SQLite CAS
  * - retrying stale writes
  */
 export const sqliteRoomStore: RoomStore = {
+  async createRoom(room: Room): Promise<Room> {
+    return insertRoom(room);
+  },
+
   async getRoom(code: string): Promise<Room> {
     return getStoredRoom(code);
   },
@@ -40,7 +46,6 @@ export const sqliteRoomStore: RoomStore = {
           lastError = error;
           continue;
         }
-
         throw error;
       }
 
@@ -51,7 +56,6 @@ export const sqliteRoomStore: RoomStore = {
           lastError = error;
           continue;
         }
-
         throw error;
       }
     }
