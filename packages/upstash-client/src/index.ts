@@ -9,3 +9,4 @@ export * from './retro.js';
 export * from './waitlist.js';
 export * from './webhooks.js';
 export * from './roomStore.js';
+export * from './turnStateStore.js';

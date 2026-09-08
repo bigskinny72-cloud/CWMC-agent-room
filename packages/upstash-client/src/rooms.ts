@@ -8,6 +8,7 @@ import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
 import { createUpstashRoomStore } from './roomStore.js';
+import { createUpstashTurnStateStore } from './turnStateStore.js';
 // 32 hex chars (~128 bits). Stored on the host's sessionStorage; only the
 // SHA-256 hash of this key lands on the server (`Room.hostKeyHash`) so a
 // passive Redis dump doesn't leak the secret.
@@ -491,7 +492,7 @@ export async function setReplyMode(
   // overwrite via newSequentialTurn / moderator startup anyway. Keeping
   // it out of the CAS mutator avoids cyclic imports and keeps the room
   // module unaware of turnState internals.
-  await client.command(['DEL', `turn-state:${code}`]);
+  await createUpstashTurnStateStore(client).clearTurnState(code);
   return updated;
 }
 
@@ -633,5 +634,8 @@ export async function setListenUntil(
     ),
   }));
 }
+
+
+
 
 

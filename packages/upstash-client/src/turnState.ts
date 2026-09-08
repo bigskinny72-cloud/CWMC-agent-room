@@ -1,4 +1,5 @@
-import type { ClientKind, Participant, ReplyMode, RoleInTurn, Room } from '@agent-room/shared';
+import type { ClientKind, Participant, ReplyMode, RoleInTurn, Room, TurnQueueEntry, TurnSpokenEntry, TurnSpokenStatus, TurnState } from '@agent-room/shared';
+export type { TurnQueueEntry, TurnSpokenEntry, TurnSpokenStatus, TurnState } from '@agent-room/shared';
 import {
   DEFAULT_LEAD_GRACE_MS,
   DEFAULT_TURN_TIMEOUTS_MS,
@@ -24,122 +25,12 @@ import { casRoom } from './rooms.js';
 // agent-by-agent until either every queued agent has spoken / been skipped,
 // or the host sends another message (which aborts and starts a new turn).
 
-export interface TurnQueueEntry {
-  name: string;
-  client: ClientKind;
-  role: RoleInTurn;
-}
-
-export type TurnSpokenStatus =
-  | 'replied'
-  | 'skipped'
-  | 'timed_out'
-  | 'no_addition'
-  | 'skipped_by_grace';
-
-export interface TurnSpokenEntry {
-  name: string;
-  client: ClientKind;
-  role: RoleInTurn;
-  status: TurnSpokenStatus;
-  at: number;
-  // Sequential round-robin: which round (1-based) this entry belongs to.
-  // Lets advanceRoundOrEnd tell whether the round just finished produced a
-  // reply. Undefined for moderator mode.
-  round?: number;
-}
-
-export interface TurnState {
-  // Stable id for the current turn (epoch ms at turn start). Used in
-  // Message.metadata.turnId so reports/UI can group lead+supplements
-  // together.
-  turnId: number;
-  // Snapshot of the mode at turn-start. If room.replyMode changes mid-turn,
-  // the next read of TurnState aborts and clears this object.
-  mode: ReplyMode;
-
-  // Sequential mode: the agent who answered first this turn. Stays set
-  // for the whole turn even after they hand off to supplements.
-  leadName?: string;
-  leadClient?: ClientKind;
-
-  // Moderator mode (Slice C): the routing agent.
-  moderatorName?: string;
-  moderatorClient?: ClientKind;
-
-  // Who is currently allowed to speak. Undefined when the turn is complete
-  // (every queued agent has spoken/skipped) but the turnState record is
-  // still around for late-arrival debugging.
-  currentName?: string;
-  currentClient?: ClientKind;
-  currentRole?: RoleInTurn;
-  // Epoch-ms by which currentName must produce a message. If Date.now()
-  // exceeds this on the next read, advanceOnTimeout() skips and moves on.
-  // Sequential mode: starts as a short FIRST_RESPONSE_GRACE window and is
-  // pushed out by each room_status heartbeat (see renewTurnDeadline).
-  deadline?: number;
-
-  // Sequential mode: absolute epoch-ms ceiling for the current speaker —
-  // set when they take the floor (= now + TURN_HARD_CAP_MS). room_status
-  // heartbeats renew `deadline` but never past this, so a single agent
-  // cannot hold a turn forever. Unset for moderator mode and once the
-  // turn has no current speaker.
-  hardDeadline?: number;
-
-  // Sequential mode only: epoch-ms until which the Lead has the floor
-  // exclusively. After this instant the queue-head supplement may also
-  // speak — whichever lands first wins the turn. Unset for moderator
-  // mode and for turns where the current speaker isn't (and never was)
-  // the Lead. Cleared by advanceTurn / applyGraceSupplementReply when
-  // we leave the lead slot, so a stale value can't accidentally re-fire.
-  leadGraceUntil?: number;
-
-  // FIFO queue of upcoming speakers.
-  queue: TurnQueueEntry[];
-
-  // Sequential round-robin: the current round number (1-based). Each round
-  // is one full pass through the room's cc agents. When the queue empties,
-  // advanceRoundOrEnd starts the next round or ends the turn.
-  round?: number;
-
-  // History of who already spoke this turn and how.
-  spoken: TurnSpokenEntry[];
-
-  // One-shot direct-invoke allowlist. An entry permits its (name, client)
-  // to send exactly one message even when they would otherwise be
-  // turn-gated; the entry is consumed on use. Sources:
-  //   - 'host':      the room host called room_direct_invoke. Works in
-  //                  any non-open mode; on consume the recipient's
-  //                  message gets roleAtSend='host_directed'.
-  //   - 'moderator': the Moderator agent called room_direct_invoke
-  //                  while in moderator mode. On consume, the
-  //                  recipient's message gets roleAtSend='assignee'
-  //                  so the report can distinguish moderator-routed
-  //                  work from host-overridden interjections.
-  hostDirected?: Array<{
-    name: string;
-    client: ClientKind;
-    addedAt: number;
-    source?: 'host' | 'moderator';
-  }>;
-}
-
-// TURN_RESET_ON_RESTART_NOTE — by design. Redis is the source of truth for
-// turnState, with TTL = ROOM_TTL_SECONDS. If a serverless instance dies in
-// the middle of a turn we still see the persisted record on next read and
-// resume from `currentName`, so a restart does NOT reset a turn — only an
-// explicit `clearTurnState` (mode change, host skip-all, room end) does.
-
 function turnStateKey(code: string): string {
   return `turn-state:${code}`;
 }
 
 const CAS_MAX_ATTEMPTS = 3;
 
-// Sequential mode runs as a round-robin: every cc agent speaks once per
-// round, round after round, until a round produces no new content (everyone
-// has converged) — capped here so a discussion that never converges still
-// ends instead of looping forever.
 export const SEQUENTIAL_MAX_ROUNDS = 10;
 
 export async function getTurnState(client: UpstashClient, code: string): Promise<TurnState | null> {
@@ -1077,3 +968,4 @@ export function myRoleInTurn(
   }
   return 'observer';
 }
+

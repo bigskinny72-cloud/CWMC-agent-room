@@ -532,3 +532,55 @@ export interface RoomReport {
   transcript: Message[];
   retro?: RoomRetro;
 }
+
+export interface TurnQueueEntry {
+  name: string;
+  client: ClientKind;
+  role: RoleInTurn;
+}
+
+export type TurnSpokenStatus =
+  | 'replied'
+  | 'skipped'
+  | 'timed_out'
+  | 'no_addition'
+  | 'skipped_by_grace';
+
+export interface TurnSpokenEntry {
+  name: string;
+  client: ClientKind;
+  role: RoleInTurn;
+  status: TurnSpokenStatus;
+  at: number;
+  round?: number;
+}
+
+export interface TurnState {
+  turnId: number;
+  mode: ReplyMode;
+
+  leadName?: string;
+  leadClient?: ClientKind;
+
+  moderatorName?: string;
+  moderatorClient?: ClientKind;
+
+  currentName?: string;
+  currentClient?: ClientKind;
+  currentRole?: RoleInTurn;
+
+  deadline?: number;
+  hardDeadline?: number;
+  leadGraceUntil?: number;
+
+  queue: TurnQueueEntry[];
+  round?: number;
+  spoken: TurnSpokenEntry[];
+
+  hostDirected?: Array<{
+    name: string;
+    client: ClientKind;
+    addedAt: number;
+    source?: 'host' | 'moderator';
+  }>;
+}
