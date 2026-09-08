@@ -11,3 +11,5 @@ export * from './webhooks.js';
 export * from './reports.js';
 
 export * from './sweepClaims.js';
+
+export * from './roomStore.js';
