@@ -241,14 +241,14 @@ function uniqueColorForRoom(
   return AVATAR_PALETTE.find(color => !used.has(color)) ?? desiredColor;
 }
 
-export async function joinRoom(
-  client: UpstashClient,
+export async function joinRoomWithStores(
+  stores: PersistenceStores,
   code: string,
   participant: Participant,
   options: JoinRoomOptions = {}
 ): Promise<JoinRoomResult> {
   let outParticipant = participant;
-  const room = await casRoom(client, code, (current) => {
+  const room = await casRoomWithStores(stores, code, (current) => {
     let next = { ...participant };
     const isOwnerReclaim = Boolean(
       options.authedUserId && current.ownerId && options.authedUserId === current.ownerId,
@@ -332,6 +332,19 @@ export async function joinRoom(
   return { ...room, participant: outParticipant };
 }
 
+export async function joinRoom(
+  client: UpstashClient,
+  code: string,
+  participant: Participant,
+  options: JoinRoomOptions = {}
+): Promise<JoinRoomResult> {
+  return joinRoomWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+    participant,
+    options,
+  );
+}
 // Pre-flight check used by callers that intend to join with the host's name.
 // Returns the verified room or throws HostNameTakenError. After this check,
 // callers proceed to joinRoom() which trusts that the host claim was
@@ -643,17 +656,31 @@ export async function updatePresence(
 // Stamp how long this participant intends to stay in their current room_listen
 // window. Other participants can read this from the room's participant list
 // to know who's actively listening vs just present-but-idle.
+export async function setListenUntilWithStores(
+  stores: PersistenceStores,
+  code: string,
+  name: string,
+  until: number
+): Promise<void> {
+  await casRoomWithStores(stores, code, (current) => ({
+    ...current,
+    participants: current.participants.map(p =>
+      p.name === name ? { ...p, listenUntil: until, lastSeenAt: Date.now() } : p
+    ),
+  }));
+}
+
 export async function setListenUntil(
   client: UpstashClient,
   code: string,
   name: string,
   until: number
 ): Promise<void> {
-  await casRoom(client, code, (current) => ({
-    ...current,
-    participants: current.participants.map(p =>
-      p.name === name ? { ...p, listenUntil: until, lastSeenAt: Date.now() } : p
-    ),
-  }));
+  return setListenUntilWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+    name,
+    until,
+  );
 }
 
