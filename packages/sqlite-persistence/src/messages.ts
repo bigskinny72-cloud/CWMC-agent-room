@@ -155,7 +155,7 @@ export function listStoredMessages(
  * Absolute lifetime count. This value never decreases when retained
  * history is trimmed.
  */
-export function getMessageCount(code: string): number {
+export function getMessageTotalCount(code: string): number | null {
   const db = getDb();
 
   const row = db.prepare(`
@@ -164,5 +164,5 @@ export function getMessageCount(code: string): number {
     WHERE code = ?
   `).get(code) as { totalCount: number } | undefined;
 
-  return row?.totalCount ?? 0;
+  return row?.totalCount ?? null;
 }

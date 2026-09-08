@@ -1,6 +1,6 @@
 import type { Message, MessageMetadata, RoleInTurn, InvocationType } from '@agent-room/shared';
-import { MAX_MESSAGES_PER_ROOM, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { createUpstashMessageStore } from './messageStore.js';
 import { findSpeaker, MutedError, NotYourTurnError, getRoom } from './rooms.js';
 import type { TurnSpokenEntry } from './turnState.js';
 import {
@@ -20,7 +20,6 @@ import {
   skipQueueHead,
 } from './turnState.js';
 
-function msgsKey(code: string): string { return `room-msgs:${code}`; }
 // Tracks the absolute count of messages ever appended to this room. Used by
 // listMessages to translate an agent's logical cursor (= "I've consumed N
 // messages so far") into the right LRANGE start position even after LTRIM has
@@ -31,14 +30,13 @@ function msgsKey(code: string): string { return `room-msgs:${code}`; }
 // message is now at index 498, but cursor=499 LRANGEs from 499 and only
 // returns the second new message). The counter key is INCRed in the same
 // pipeline as RPUSH/LTRIM so it can never drift relative to the list.
-function msgCountKey(code: string): string { return `room-msg-count:${code}`; }
 
 /** Next poll cursor after a full `listMessages(..., 0)` when the room has a counter key; `null` = legacy room. */
-export async function getMessageTotalCount(client: UpstashClient, code: string): Promise<number | null> {
-  const countRaw = await client.command<unknown>(['GET', msgCountKey(code)]);
-  if (countRaw === null || countRaw === undefined) return null;
-  const totalCount = typeof countRaw === 'number' ? countRaw : parseInt(String(countRaw), 10);
-  return Number.isFinite(totalCount) ? totalCount : null;
+export async function getMessageTotalCount(
+  client: UpstashClient,
+  code: string,
+): Promise<number | null> {
+  return createUpstashMessageStore(client).getMessageTotalCount(code);
 }
 
 // Supplement-skip token. A supplement agent that has nothing to add MUST
@@ -313,19 +311,11 @@ async function rpushMessage(
   message: Message,
   roomCreatedAt: number,
 ): Promise<void> {
-  const expireAt = (Number.isFinite(roomCreatedAt) ? Math.floor(roomCreatedAt / 1000) : Math.floor(Date.now() / 1000)) + ROOM_TTL_SECONDS;
-  // Older MCP clients (and raw API callers) can send a message with no
-  // `text` — persisting it verbatim crashed every web viewer of the room
-  // ("Cannot read properties of undefined (reading 'length')" in Bubble
-  // rendering). Coerce to '' at the single write choke point.
-  const safe = typeof message.text === 'string' ? message : { ...message, text: '' };
-  await client.pipeline([
-    ['RPUSH', msgsKey(code), JSON.stringify(safe)],
-    ['INCR', msgCountKey(code)],
-    ['LTRIM', msgsKey(code), -MAX_MESSAGES_PER_ROOM, -1],
-    ['EXPIREAT', msgsKey(code), expireAt],
-    ['EXPIREAT', msgCountKey(code), expireAt],
-  ]);
+  await createUpstashMessageStore(client).appendMessage(
+    code,
+    message,
+    roomCreatedAt,
+  );
 }
 
 // Append a server-originated system message. Bypasses the speaker/mute/turn
@@ -353,46 +343,16 @@ export async function appendSystemMessage(
 export async function listMessages(
   client: UpstashClient,
   code: string,
-  fromIndex: number
+  fromIndex: number,
 ): Promise<Message[]> {
-  // One pipeline: ask for both the absolute count and the current list length.
-  // count===null means this is a legacy room created before the counter was
-  // introduced — fall back to treating fromIndex as a list-index (matches
-  // pre-fix behavior; still buggy past 500 messages but no worse than before
-  // and avoids breaking in-flight conversations during the rollout).
-  const meta = await client.pipeline<unknown>([
-    ['GET', msgCountKey(code)],
-    ['LLEN', msgsKey(code)],
-  ]);
-  const countRaw = meta[0] as string | number | null;
-  const listLen = Number(meta[1] ?? 0);
-  if (listLen === 0) return [];
-
-  let start: number;
-  if (countRaw === null || countRaw === undefined) {
-    start = fromIndex;
-  } else {
-    const totalCount = typeof countRaw === 'number' ? countRaw : parseInt(countRaw, 10);
-    // `trimmed` is the number of head entries LTRIM has dropped over this
-    // room's lifetime. Subtracting it from the agent's absolute cursor
-    // gives the right list-index for the next unread message.
-    const trimmed = totalCount - listLen;
-    start = fromIndex - trimmed;
-    // If the agent's cursor lags so far that messages it never saw have
-    // already been LTRIMmed away, the best we can do is hand back the
-    // surviving prefix from index 0 — those older messages are gone for
-    // good (LTRIM is destructive; the report/minutes export is the only
-    // way to recover full transcripts past the cap).
-    if (start < 0) start = 0;
-  }
-
-  if (start >= listLen) return [];
-  const raw = await client.command<string[]>(['LRANGE', msgsKey(code), start, -1]);
-  return raw.map(line => {
-    const m = JSON.parse(line) as Message;
-    // Heal text-less messages already stored by older clients — without
-    // this, one bad message bricks the room page for every viewer.
-    if (typeof m.text !== 'string') m.text = '';
-    return m;
-  });
+  return createUpstashMessageStore(client).listMessages(
+    code,
+    fromIndex,
+  );
 }
+
+
+
+
+
+
