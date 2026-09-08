@@ -584,3 +584,12 @@ export interface TurnState {
     source?: 'host' | 'moderator';
   }>;
 }
+
+export interface RoomWebhook {
+  id: string;
+  url: string;
+  registeredBy: string;
+  secret?: string;
+  createdAt: number;
+  failCount?: number;
+}

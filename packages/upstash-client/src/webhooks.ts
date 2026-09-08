@@ -13,42 +13,26 @@
 // low-stakes enough that we accept the (tiny) lost-update window instead of
 // pulling in a CAS loop.
 
-import { ROOM_TTL_SECONDS } from '@agent-room/shared';
+import type { RoomWebhook } from '@agent-room/shared';
+export type { RoomWebhook } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { createUpstashWebhookStore } from './webhookStore.js';
 import { getRoom } from './rooms.js';
 
 export const MAX_WEBHOOKS_PER_ROOM = 5;
 
-export interface RoomWebhook {
-  id: string;
-  url: string;
-  // Display name of the participant that registered the hook. That agent's
-  // own messages never trigger it (no self-wake loops).
-  registeredBy: string;
-  // Optional HMAC-SHA256 key; when set, deliveries carry
-  // X-AgentRoom-Signature: sha256=<hex hmac of the raw body>.
-  secret?: string;
-  createdAt: number;
-  // Consecutive delivery failures; reset on success. Dispatch drops the
-  // hook once this crosses its give-up threshold.
-  failCount?: number;
-}
 
-function webhooksKey(code: string): string { return `room-webhooks:${code}`; }
+
 
 function randomId(): string {
   return 'wh_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6);
 }
 
-export async function listRoomWebhooks(client: UpstashClient, code: string): Promise<RoomWebhook[]> {
-  const raw = await client.command<string | null>(['GET', webhooksKey(code)]);
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(typeof raw === 'string' ? raw : String(raw)) as unknown;
-    return Array.isArray(parsed) ? (parsed as RoomWebhook[]) : [];
-  } catch {
-    return [];
-  }
+export async function listRoomWebhooks(
+  client: UpstashClient,
+  code: string,
+): Promise<RoomWebhook[]> {
+  return createUpstashWebhookStore(client).listWebhooks(code);
 }
 
 export async function saveRoomWebhooks(
@@ -57,13 +41,11 @@ export async function saveRoomWebhooks(
   hooks: RoomWebhook[],
   roomCreatedAt: number,
 ): Promise<void> {
-  const expireAt =
-    (Number.isFinite(roomCreatedAt) ? Math.floor(roomCreatedAt / 1000) : Math.floor(Date.now() / 1000)) +
-    ROOM_TTL_SECONDS;
-  await client.pipeline([
-    ['SET', webhooksKey(code), JSON.stringify(hooks)],
-    ['EXPIREAT', webhooksKey(code), expireAt],
-  ]);
+  await createUpstashWebhookStore(client).saveWebhooks(
+    code,
+    hooks,
+    roomCreatedAt,
+  );
 }
 
 export class WebhookLimitError extends Error {
@@ -127,3 +109,7 @@ export async function unregisterRoomWebhook(
   await saveRoomWebhooks(client, code, next, room.createdAt);
   return true;
 }
+
+
+
+
