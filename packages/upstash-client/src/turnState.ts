@@ -3,12 +3,11 @@ export type { TurnQueueEntry, TurnSpokenEntry, TurnSpokenStatus, TurnState } fro
 import {
   DEFAULT_LEAD_GRACE_MS,
   DEFAULT_TURN_TIMEOUTS_MS,
-  FIRST_RESPONSE_GRACE_MS,
-  ROOM_TTL_SECONDS,
-  TURN_HARD_CAP_MS,
+  FIRST_RESPONSE_GRACE_MS,  TURN_HARD_CAP_MS,
   TURN_RENEWAL_MS,
 } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { createUpstashTurnStateStore } from './turnStateStore.js';
 import { createUpstashSweepClaimStore } from './sweepClaimStore.js';
 import { ConcurrencyError } from './errors.js';
 import { casRoom } from './rooms.js';
@@ -35,21 +34,15 @@ const CAS_MAX_ATTEMPTS = 3;
 export const SEQUENTIAL_MAX_ROUNDS = 10;
 
 export async function getTurnState(client: UpstashClient, code: string): Promise<TurnState | null> {
-  const raw = await client.command<string | null>(['GET', turnStateKey(code)]);
-  if (raw === null || raw === undefined) return null;
-  try {
-    return JSON.parse(raw) as TurnState;
-  } catch {
-    return null;
-  }
+  return createUpstashTurnStateStore(client).getTurnState(code);
 }
 
 export async function setTurnState(client: UpstashClient, code: string, state: TurnState): Promise<void> {
-  await client.command(['SET', turnStateKey(code), JSON.stringify(state), 'EX', ROOM_TTL_SECONDS]);
+  await createUpstashTurnStateStore(client).setTurnState(code, state);
 }
 
 export async function clearTurnState(client: UpstashClient, code: string): Promise<void> {
-  await client.command(['DEL', turnStateKey(code)]);
+  await createUpstashTurnStateStore(client).clearTurnState(code);
 }
 
 // CAS wrapper analogous to casRoom. The mutator may return `null` to mean
@@ -61,27 +54,7 @@ export async function casTurnState(
   code: string,
   mutator: (current: TurnState | null) => TurnState | null,
 ): Promise<TurnState | null> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < CAS_MAX_ATTEMPTS; attempt++) {
-    const current = await getTurnState(client, code);
-    let next: TurnState | null;
-    try {
-      next = mutator(current);
-    } catch (e) {
-      if (e instanceof ConcurrencyError) {
-        lastError = e;
-        continue;
-      }
-      throw e;
-    }
-    if (next === null) {
-      if (current !== null) await clearTurnState(client, code);
-      return null;
-    }
-    await setTurnState(client, code, next);
-    return next;
-  }
-  throw lastError instanceof ConcurrencyError ? lastError : new ConcurrencyError();
+  return createUpstashTurnStateStore(client).mutateTurnState(code, mutator);
 }
 
 // Resolve the lead-grace window in ms for this room. Honors the
