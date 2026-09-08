@@ -1,9 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { createClient } from '@agent-room/upstash-client';
+import { openDb, createSqlitePersistenceStores } from '@agent-room/sqlite-persistence';
 import {
-  getRoom,
-  joinRoom,
-  setListenUntil,
+  getRoomWithStores,
+  joinRoomWithStores,
+  setListenUntilWithStores,
   RoomNotFoundError,
   HostNameTakenError,
   InterviewRoomBusyError,
@@ -14,8 +14,8 @@ import {
   ModeNotSupportedError,
 } from '@agent-room/upstash-client';
 import {
-  listMessages,
-  appendMessage,
+  listMessagesWithStores,
+  appendMessageWithStores,
 } from '@agent-room/upstash-client';
 import type {
   Room,
@@ -24,15 +24,14 @@ import type {
   ClientKind,
 } from '@agent-room/shared';
 
-const url = process.env.UPSTASH_REDIS_REST_URL;
-const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+const sqlitePath = process.env.AGENT_ROOM_SQLITE_PATH;
 
-if (!url || !token) {
-  throw new Error('Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN');
+if (!sqlitePath) {
+  throw new Error('Missing AGENT_ROOM_SQLITE_PATH');
 }
 
-const client = createClient({ url, token });
-
+openDb(sqlitePath, 'open');
+const stores = createSqlitePersistenceStores();
 function errorResponse(res: VercelResponse, error: unknown, defaultStatus = 500): void {
   if (error instanceof RoomNotFoundError) {
     res.status(404).json({ error: 'RoomNotFoundError', message: error.message });
@@ -80,7 +79,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           res.status(400).json({ error: 'InvalidRequest', message: 'Missing code' });
           return;
         }
-        const room = await getRoom(client, code);
+        const room = await getRoomWithStores(stores, code);
         res.status(200).json({ room });
         return;
       }
@@ -96,7 +95,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const result = await joinRoom(client, code, participant, { hostKey, priorIdentity });
+        const result = await joinRoomWithStores(stores, code, participant, { hostKey, priorIdentity });
         res.status(200).json(result);
         return;
       }
@@ -110,7 +109,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const messages = await listMessages(client, code, cursor);
+        const messages = await listMessagesWithStores(stores, code, cursor);
         res.status(200).json({ messages });
         return;
       }
@@ -125,7 +124,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const result = await appendMessage(client, code, message, kind);
+        const result = await appendMessageWithStores(stores, code, message, kind);
         res.status(200).json({ result });
         return;
       }
@@ -140,7 +139,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        await setListenUntil(client, code, name, until);
+        await setListenUntilWithStores(stores, code, name, until);
         res.status(200).json({});
         return;
       }
