@@ -158,7 +158,7 @@ const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 // CAS wrapper. The mutator returns the next board; it may throw to abort (e.g. a
 // validation error), which propagates out. On a write conflict we re-read the
 // fresh board and re-run the mutator, so a concurrent change is never clobbered.
-async function casTaskBoard(
+export async function casTaskBoard(
   client: UpstashClient,
   code: string,
   mutator: (current: TaskBoard) => TaskBoard,
