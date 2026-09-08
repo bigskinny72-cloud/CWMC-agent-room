@@ -6,9 +6,9 @@ import type {
 } from '@agent-room/shared';
 import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import type { PersistenceStores } from '@agent-room/persistence';
+import { createUpstashPersistenceStores } from './persistenceStores.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
-import { createUpstashRoomStore } from './roomStore.js';
-import { createUpstashTurnStateStore } from './turnStateStore.js';
 // 32 hex chars (~128 bits). Stored on the host's sessionStorage; only the
 // SHA-256 hash of this key lands on the server (`Room.hostKeyHash`) so a
 // passive Redis dump doesn't leak the secret.
@@ -54,7 +54,7 @@ export interface CreateRoomInput {
 // New, host-aware callers destructure `hostKey` off the same value.
 export type CreateRoomResult = Room & { hostKey: string };
 
-export async function createRoom(client: UpstashClient, input: CreateRoomInput): Promise<CreateRoomResult> {
+export async function createRoomWithStores(stores: PersistenceStores, input: CreateRoomInput): Promise<CreateRoomResult> {
   const now = Date.now();
   const hostKey = generateHostKey();
   const room: Room = {
@@ -85,20 +85,42 @@ export async function createRoom(client: UpstashClient, input: CreateRoomInput):
     projectPromptVersion: input.projectPromptVersion,
     projectPromptUpdatedAt: input.projectPromptUpdatedAt,
   };
-  await createUpstashRoomStore(client).createRoom(room);
+  await stores.rooms.createRoom(room);
   return { ...room, hostKey };
 }
 
-export async function getRoom(client: UpstashClient, code: string): Promise<Room> {
-  return createUpstashRoomStore(client).getRoom(code);
+export async function getRoomWithStores(stores: PersistenceStores, code: string): Promise<Room> {
+  return stores.rooms.getRoom(code);
+}
+
+export async function casRoomWithStores(
+  stores: PersistenceStores,
+  code: string,
+  mutator: (current: Room) => Room
+): Promise<Room> {
+  return stores.rooms.casRoom(code, mutator);
+}
+
+export async function createRoom(
+  client: UpstashClient,
+  input: CreateRoomInput,
+): Promise<CreateRoomResult> {
+  return createRoomWithStores(createUpstashPersistenceStores(client), input);
+}
+
+export async function getRoom(
+  client: UpstashClient,
+  code: string,
+): Promise<Room> {
+  return getRoomWithStores(createUpstashPersistenceStores(client), code);
 }
 
 export async function casRoom(
   client: UpstashClient,
   code: string,
-  mutator: (current: Room) => Room
+  mutator: (current: Room) => Room,
 ): Promise<Room> {
-  return createUpstashRoomStore(client).casRoom(code, mutator);
+  return casRoomWithStores(createUpstashPersistenceStores(client), code, mutator);
 }
 // Thrown when a non-host tries to claim the host's display name. The room
 // rejects rather than auto-suffixing because impersonation of the host has
@@ -492,7 +514,7 @@ export async function setReplyMode(
   // overwrite via newSequentialTurn / moderator startup anyway. Keeping
   // it out of the CAS mutator avoids cyclic imports and keeps the room
   // module unaware of turnState internals.
-  await createUpstashTurnStateStore(client).clearTurnState(code);
+  await createUpstashPersistenceStores(client).turnState.clearTurnState(code);
   return updated;
 }
 
@@ -634,8 +656,4 @@ export async function setListenUntil(
     ),
   }));
 }
-
-
-
-
 
