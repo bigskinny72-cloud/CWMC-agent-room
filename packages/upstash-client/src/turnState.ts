@@ -9,6 +9,7 @@ import {
   TURN_RENEWAL_MS,
 } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { createUpstashSweepClaimStore } from './sweepClaimStore.js';
 import { ConcurrencyError } from './errors.js';
 import { casRoom } from './rooms.js';
 
@@ -685,9 +686,7 @@ async function claimDeadEndNotice(
   code: string,
   identity: string,
 ): Promise<boolean> {
-  const key = `sweepDeadEnd:${code}:${identity}`;
-  const won = await client.command<string | null>(['SET', key, '1', 'NX', 'EX', '30']);
-  return won === 'OK';
+  return createUpstashSweepClaimStore(client).acquireSweepClaim(code, identity);
 }
 
 // Lazy timeout sweep, called from the long-poll loop in apps/mcp/src/tools.ts
@@ -968,4 +967,3 @@ export function myRoleInTurn(
   }
   return 'observer';
 }
-
