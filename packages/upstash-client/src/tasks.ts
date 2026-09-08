@@ -14,9 +14,10 @@
 //     (NotVerifierError) anyone who is not the task's designated verifier — and
 //     always rejects the owner verifying their own task (OwnerCannotVerifyError).
 import type { ClientKind, SubTask, Task, TaskBoard, TaskEvidence, TaskRoleChange, TaskState } from '@agent-room/shared';
-import { ROOM_TTL_SECONDS, TASK_BLOCK_DEMOTE_THRESHOLD } from '@agent-room/shared';
+import { TASK_BLOCK_DEMOTE_THRESHOLD } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
-import { ConcurrencyError, UpstashError } from './errors.js';
+import { UpstashError } from './errors.js';
+import { createUpstashTaskBoardStore } from './taskBoardStore.js';
 
 export class TaskNotFoundError extends UpstashError {
   constructor(id: string) { super(`Task ${id} not found`); this.name = 'TaskNotFoundError'; }
@@ -74,124 +75,35 @@ function claimerIsDesignatedVerifier(
 // important mutations (claim/submit/verify/reassign) must survive a few lost
 // races under contention (poll review + cron + multiple agents writing). 3 was
 // fine when the write was unconditional; give more headroom now.
-const CAS_MAX_ATTEMPTS = 6;
 
-function taskBoardKey(code: string): string {
-  return `task-board:${code}`;
+
+function taskBoardStore(client: UpstashClient) {
+  return createUpstashTaskBoardStore(client);
 }
 
-// Index of rooms that have ever had a task created, so a periodic cron sweep
-// can find boards to review without SCANning all of Redis. Rooms are pruned
-// from this set by the sweep when their board is gone / all-done / the room
-// ended. The set self-expires (refreshed on each register) so an abandoned
-// deploy doesn't leak it forever.
-const BOARD_ROOMS_KEY = 'task-board:rooms';
-
 export async function registerBoardRoom(client: UpstashClient, code: string): Promise<void> {
-  await client.pipeline([
-    ['SADD', BOARD_ROOMS_KEY, code],
-    ['EXPIRE', BOARD_ROOMS_KEY, ROOM_TTL_SECONDS],
-  ]);
+  await taskBoardStore(client).registerBoardRoom(code);
 }
 
 export async function unregisterBoardRoom(client: UpstashClient, code: string): Promise<void> {
-  await client.command(['SREM', BOARD_ROOMS_KEY, code]);
+  await taskBoardStore(client).unregisterBoardRoom(code);
 }
 
 export async function listBoardRooms(client: UpstashClient): Promise<string[]> {
-  const members = await client.command<string[] | null>(['SMEMBERS', BOARD_ROOMS_KEY]);
-  return Array.isArray(members) ? members : [];
-}
-
-async function getTaskBoardRaw(client: UpstashClient, code: string): Promise<string | null> {
-  const raw = await client.command<string | null>(['GET', taskBoardKey(code)]);
-  return raw === null || raw === undefined ? null : raw;
+  return taskBoardStore(client).listBoardRooms();
 }
 
 export async function getTaskBoard(client: UpstashClient, code: string): Promise<TaskBoard | null> {
-  const raw = await getTaskBoardRaw(client, code);
-  if (raw === null) return null;
-  try {
-    return JSON.parse(raw) as TaskBoard;
-  } catch {
-    return null;
-  }
+  return taskBoardStore(client).getTaskBoard(code);
 }
 
-// Atomic compare-and-swap write, run server-side in Redis via EVAL: set the
-// board to nextRaw ONLY if the stored value is still exactly what we last read
-// (expectedRaw), or still absent when expectedRaw is null. Returns true if it
-// wrote, false on a conflict. This is the real CAS the previous unconditional
-// SET lacked — without it, two concurrent writers (a verify, a board-review
-// stamp, a marker apply, the cron) both read vN and both wrote vN+1, so the
-// later write clobbered the earlier one (a 'done' would flash then revert), and
-// a transient null read made the mutator run on an empty board and blank the
-// whole board to 0. The CAS makes both cases retry against fresh state instead.
-const CAS_SCRIPT =
-  "local cur = redis.call('GET', KEYS[1])\n" +
-  "if ARGV[1] == 'absent' then\n" +
-  "  if cur then return 0 end\n" +
-  "else\n" +
-  "  if cur ~= ARGV[2] then return 0 end\n" +
-  "end\n" +
-  "redis.call('SET', KEYS[1], ARGV[3], 'EX', tonumber(ARGV[4]))\n" +
-  "return 1";
-
-async function casWriteTaskBoard(
-  client: UpstashClient,
-  code: string,
-  expectedRaw: string | null,
-  nextRaw: string,
-): Promise<boolean> {
-  const res = await client.command<number>([
-    'EVAL', CAS_SCRIPT, '1', taskBoardKey(code),
-    expectedRaw === null ? 'absent' : 'present',
-    expectedRaw ?? '',
-    nextRaw,
-    String(ROOM_TTL_SECONDS),
-  ]);
-  return Number(res) === 1;
-}
-
-const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
-
-// CAS wrapper. The mutator returns the next board; it may throw to abort (e.g. a
-// validation error), which propagates out. On a write conflict we re-read the
-// fresh board and re-run the mutator, so a concurrent change is never clobbered.
 export async function casTaskBoard(
   client: UpstashClient,
   code: string,
   mutator: (current: TaskBoard) => TaskBoard,
 ): Promise<TaskBoard> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < CAS_MAX_ATTEMPTS; attempt++) {
-    const raw = await getTaskBoardRaw(client, code);
-    let current: TaskBoard;
-    if (raw === null) {
-      current = { code, tasks: [], version: 0 };
-    } else {
-      try { current = JSON.parse(raw) as TaskBoard; }
-      catch { current = { code, tasks: [], version: 0 }; } // corrupt → reset; CAS still guards
-    }
-    let next: TaskBoard;
-    try {
-      next = mutator(current);
-    } catch (e) {
-      if (e instanceof ConcurrencyError) { lastError = e; continue; }
-      throw e;
-    }
-    next.version = current.version + 1;
-    if (await casWriteTaskBoard(client, code, raw, JSON.stringify(next))) {
-      return next;
-    }
-    // Lost the race — another writer changed the board between our read and
-    // write. Back off briefly and retry against the fresh state.
-    lastError = new ConcurrencyError();
-    await sleep(20 + Math.floor(Math.random() * 50));
-  }
-  throw lastError instanceof ConcurrencyError ? lastError : new ConcurrencyError();
+  return taskBoardStore(client).mutateTaskBoard(code, mutator);
 }
-
 function findTask(board: TaskBoard, id: string): Task {
   const t = board.tasks.find(x => x.id === id);
   if (!t) throw new TaskNotFoundError(id);
@@ -703,8 +615,8 @@ export function boardNeedsReview(board: TaskBoard, intervalMs: number, now: numb
 }
 
 export async function clearTaskBoard(client: UpstashClient, code: string): Promise<void> {
-  await client.command(['DEL', taskBoardKey(code)]);
-  await unregisterBoardRoom(client, code).catch(() => { /* best-effort */ });
+  await taskBoardStore(client).clearTaskBoard(code);
+
 }
 
 // ── Board-sweep helpers (used by the server's periodic task-board sweep) ──
