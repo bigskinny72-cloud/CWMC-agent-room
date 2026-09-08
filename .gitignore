@@ -27,3 +27,9 @@ HANDOFF.md
 agentroom-research-report.html
 agent_room_cleanup.md
 dist-mcpb
+
+# Local Agent Room SQLite persistence
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
