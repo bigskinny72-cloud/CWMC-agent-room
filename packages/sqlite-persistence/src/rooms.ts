@@ -1,44 +1,31 @@
 import type { Room } from '@agent-room/shared';
+import {
+  ConcurrencyError,
+  RoomNotFoundError,
+} from '@agent-room/persistence';
 import { getDb } from './db.js';
 
-export class RoomNotFoundError extends Error {
-  constructor(code: string) {
-    super(`Room ${code} not found`);
-    this.name = 'RoomNotFoundError';
-  }
-}
-
-export class ConcurrencyError extends Error {
-  constructor() {
-    super('Concurrent update — version mismatch');
-    this.name = 'ConcurrencyError';
-  }
-}
+export { ConcurrencyError, RoomNotFoundError };
 
 export function insertRoom(room: Room): Room {
   const db = getDb();
-
   const stmt = db.prepare(`
     INSERT INTO rooms (code, roomJson, version)
     VALUES (?, ?, ?)
   `);
-
   stmt.run(room.code, JSON.stringify(room), room.version);
   return room;
 }
 
 export function getRoom(code: string): Room {
   const db = getDb();
-
   const row = db.prepare(`
     SELECT roomJson
     FROM rooms
     WHERE code = ?
   `).get(code) as { roomJson: string } | undefined;
 
-  if (!row) {
-    throw new RoomNotFoundError(code);
-  }
+  if (!row) throw new RoomNotFoundError(code);
 
   return JSON.parse(row.roomJson) as Room;
 }
@@ -58,10 +45,7 @@ export function casRoom(
 
   const tx = db.transaction(() => {
     const newVersion = expectedVersion + 1;
-    const updated: Room = {
-      ...next,
-      version: newVersion,
-    };
+    const updated: Room = { ...next, version: newVersion };
 
     const result = write.run(
       JSON.stringify(updated),
@@ -77,9 +61,7 @@ export function casRoom(
         WHERE code = ?
       `).get(code);
 
-      if (!exists) {
-        throw new RoomNotFoundError(code);
-      }
+      if (!exists) throw new RoomNotFoundError(code);
 
       throw new ConcurrencyError();
     }

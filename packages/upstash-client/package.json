@@ -15,6 +15,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@agent-room/persistence": "^0.0.1",
     "@agent-room/shared": "*"
   },
   "devDependencies": {
