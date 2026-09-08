@@ -4,12 +4,10 @@ import type {
   ReplyMode,
   ReplyModeConfig,
 } from '@agent-room/shared';
-import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS, ROOM_TTL_SECONDS } from '@agent-room/shared';
+import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
-
-function roomKey(code: string): string { return `room:${code}`; }
-
+import { createUpstashRoomStore } from './roomStore.js';
 // 32 hex chars (~128 bits). Stored on the host's sessionStorage; only the
 // SHA-256 hash of this key lands on the server (`Room.hostKeyHash`) so a
 // passive Redis dump doesn't leak the secret.
@@ -86,49 +84,21 @@ export async function createRoom(client: UpstashClient, input: CreateRoomInput):
     projectPromptVersion: input.projectPromptVersion,
     projectPromptUpdatedAt: input.projectPromptUpdatedAt,
   };
-  await client.command(['SET', roomKey(input.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS]);
+  await createUpstashRoomStore(client).createRoom(room);
   return { ...room, hostKey };
 }
 
 export async function getRoom(client: UpstashClient, code: string): Promise<Room> {
-  const raw = await client.command<string | null>(['GET', roomKey(code)]);
-  if (raw === null || raw === undefined) throw new RoomNotFoundError(code);
-  return JSON.parse(raw) as Room;
+  return createUpstashRoomStore(client).getRoom(code);
 }
-
-const CAS_MAX_ATTEMPTS = 3;
 
 export async function casRoom(
   client: UpstashClient,
   code: string,
   mutator: (current: Room) => Room
 ): Promise<Room> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < CAS_MAX_ATTEMPTS; attempt++) {
-    const current = await getRoom(client, code);
-    let next: Room;
-    try {
-      next = mutator(current);
-    } catch (e) {
-      if (e instanceof ConcurrencyError) {
-        lastError = e;
-        continue;
-      }
-      throw e;
-    }
-    // Optimistic write: bump version. Full atomic CAS is deferred — a stale-read-then-overwrite
-    // window is acceptable here because the only mutable field is `participants`, and messages
-    // (the hot path) use atomic RPUSH. Version bumps make drift visible if it ever matters.
-    next.version = current.version + 1;
-    // KEEPTTL preserves the 24h deadline createRoom set, so a room is a hard
-    // cap from creation — activity (joins, presence heartbeats) no longer
-    // slides the expiry forward, which is what kept rooms alive past 24h.
-    await client.command(['SET', roomKey(code), JSON.stringify(next), 'KEEPTTL']);
-    return next;
-  }
-  throw lastError instanceof ConcurrencyError ? lastError : new ConcurrencyError();
+  return createUpstashRoomStore(client).casRoom(code, mutator);
 }
-
 // Thrown when a non-host tries to claim the host's display name. The room
 // rejects rather than auto-suffixing because impersonation of the host has
 // outsized blast radius — agents trust host instructions.
@@ -663,3 +633,5 @@ export async function setListenUntil(
     ),
   }));
 }
+
+
