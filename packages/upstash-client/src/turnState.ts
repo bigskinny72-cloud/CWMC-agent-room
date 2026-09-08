@@ -7,7 +7,8 @@ import {
   TURN_RENEWAL_MS,
 } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
-import { createUpstashTurnStateStore } from './turnStateStore.js';
+import type { PersistenceStores } from '@agent-room/persistence';
+import { createUpstashPersistenceStores } from './persistenceStores.js';
 import { createUpstashSweepClaimStore } from './sweepClaimStore.js';
 import { ConcurrencyError } from './errors.js';
 import { casRoom } from './rooms.js';
@@ -25,24 +26,60 @@ import { casRoom } from './rooms.js';
 // agent-by-agent until either every queued agent has spoken / been skipped,
 // or the host sends another message (which aborts and starts a new turn).
 
-function turnStateKey(code: string): string {
-  return `turn-state:${code}`;
-}
-
 const CAS_MAX_ATTEMPTS = 3;
 
 export const SEQUENTIAL_MAX_ROUNDS = 10;
 
-export async function getTurnState(client: UpstashClient, code: string): Promise<TurnState | null> {
-  return createUpstashTurnStateStore(client).getTurnState(code);
+export async function getTurnStateWithStores(
+  stores: PersistenceStores,
+  code: string,
+): Promise<TurnState | null> {
+  return stores.turnState.getTurnState(code);
 }
 
-export async function setTurnState(client: UpstashClient, code: string, state: TurnState): Promise<void> {
-  await createUpstashTurnStateStore(client).setTurnState(code, state);
+export async function setTurnStateWithStores(
+  stores: PersistenceStores,
+  code: string,
+  state: TurnState,
+): Promise<void> {
+  await stores.turnState.setTurnState(code, state);
 }
 
-export async function clearTurnState(client: UpstashClient, code: string): Promise<void> {
-  await createUpstashTurnStateStore(client).clearTurnState(code);
+export async function clearTurnStateWithStores(
+  stores: PersistenceStores,
+  code: string,
+): Promise<void> {
+  await stores.turnState.clearTurnState(code);
+}
+
+export async function casTurnStateWithStores(
+  stores: PersistenceStores,
+  code: string,
+  mutator: (current: TurnState | null) => TurnState | null,
+): Promise<TurnState | null> {
+  return stores.turnState.mutateTurnState(code, mutator);
+}
+
+export async function getTurnState(
+  client: UpstashClient,
+  code: string,
+): Promise<TurnState | null> {
+  return getTurnStateWithStores(createUpstashPersistenceStores(client), code);
+}
+
+export async function setTurnState(
+  client: UpstashClient,
+  code: string,
+  state: TurnState,
+): Promise<void> {
+  await setTurnStateWithStores(createUpstashPersistenceStores(client), code, state);
+}
+
+export async function clearTurnState(
+  client: UpstashClient,
+  code: string,
+): Promise<void> {
+  await clearTurnStateWithStores(createUpstashPersistenceStores(client), code);
 }
 
 // CAS wrapper analogous to casRoom. The mutator may return `null` to mean
@@ -54,9 +91,12 @@ export async function casTurnState(
   code: string,
   mutator: (current: TurnState | null) => TurnState | null,
 ): Promise<TurnState | null> {
-  return createUpstashTurnStateStore(client).mutateTurnState(code, mutator);
+  return casTurnStateWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+    mutator,
+  );
 }
-
 // Resolve the lead-grace window in ms for this room. Honors the
 // per-room override if present, otherwise DEFAULT_LEAD_GRACE_MS.
 export function leadGraceMs(room: Room): number {
@@ -940,3 +980,5 @@ export function myRoleInTurn(
   }
   return 'observer';
 }
+
+
