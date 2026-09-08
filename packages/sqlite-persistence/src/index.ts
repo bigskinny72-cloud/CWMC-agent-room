@@ -19,3 +19,4 @@ export * from './messageStore.js';
 export * from './webhookStore.js';
 export * from './reportStore.js';
 export * from './sweepClaimStore.js';
+export * from './persistenceStores.js';
