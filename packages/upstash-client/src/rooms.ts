@@ -361,21 +361,29 @@ export async function joinRoom(
 // the key permanently locked the real owner out of their own room.
 // Anonymous rooms (no ownerId) and the bare-key path are unchanged, so a caller
 // who only has the room code still cannot impersonate the host.
-export async function verifyHostClaim(
-  client: UpstashClient,
+export async function verifyHostClaimWithStores(
+  stores: PersistenceStores,
   code: string,
   proof: { hostKey?: string | undefined; authedUserId?: string | null },
 ): Promise<void> {
-  const room = await getRoom(client, code);
-  // Legacy rooms created before hostKeyHash existed: allow any claim.
+  const room = await getRoomWithStores(stores, code);
   if (!room.hostKeyHash) return;
-  // Authenticated room owner is always the host, key or no key.
   if (proof.authedUserId && room.ownerId && proof.authedUserId === room.ownerId) return;
   if (!proof.hostKey) throw new HostNameTakenError(room.createdBy);
   const hash = await sha256Hex(proof.hostKey);
   if (hash !== room.hostKeyHash) throw new HostNameTakenError(room.createdBy);
 }
-
+export async function verifyHostClaim(
+  client: UpstashClient,
+  code: string,
+  proof: { hostKey?: string | undefined; authedUserId?: string | null },
+): Promise<void> {
+  return verifyHostClaimWithStores(
+    createUpstashPersistenceStores(client),
+    code,
+    proof,
+  );
+}
 // Back-compat thin wrapper: key-only verification (no authenticated identity).
 export async function verifyHostKey(
   client: UpstashClient,

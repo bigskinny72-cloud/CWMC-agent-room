@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { createClient, getRoom, joinRoom, verifyHostKey, HostNameTakenError, RoomNotFoundError } from '@agent-room/upstash-client';
+import { HostNameTakenError, RoomNotFoundError } from '@agent-room/upstash-client';
+import { getRoom, joinRoom, verifyHostKey } from '../lib/roomApi.js';
 import type { Room } from '@agent-room/shared';
 import { ROOM_POLL_MS } from '@agent-room/shared';
-import { ENV } from '../env.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
@@ -17,7 +17,6 @@ export function Lobby() {
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    const client = createClient(ENV.upstash);
     const stored = sessionStorage.getItem(`room:${code}:self`);
     const self = stored ? JSON.parse(stored) as { name: string; role: string } : null;
 
@@ -29,7 +28,7 @@ export function Lobby() {
           // Pre-flight: if we're claiming the host's display name, prove
           // we own the host key. Without this, anyone with the code could
           // pretend to be the host.
-          const room = await getRoom(client, code);
+          const room = await getRoom(code);
           if (self.name === room.createdBy) {
             // Read from localStorage (room-scoped, survives tab close) with
             // a sessionStorage fallback for hosts who created the room before
@@ -37,11 +36,11 @@ export function Lobby() {
             const hostKey = localStorage.getItem(`room:${code}:hostKey`)
               ?? sessionStorage.getItem(`room:${code}:hostKey`)
               ?? undefined;
-            await verifyHostKey(client, code, hostKey);
+            await verifyHostKey(code, hostKey);
           }
           // priorIdentity tells joinRoom this is the same logical session
           // updating its own row, so a refresh doesn't get auto-suffixed.
-          await joinRoom(client, code, {
+          await joinRoom(code, {
             name: self.name,
             role: self.role,
             color: colorForName(self.name),
@@ -70,7 +69,7 @@ export function Lobby() {
 
     async function refresh() {
       try {
-        const r = await getRoom(client, code);
+        const r = await getRoom(code);
         if (!cancelled) setRoom(r);
       } catch (e) {
         if (!cancelled) setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e));

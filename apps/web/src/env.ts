@@ -1,12 +1,10 @@
-function must(name: string): string {
-  const val = (import.meta.env as Record<string, string | undefined>)[name];
-  if (!val) throw new Error(`Missing env var: ${name}`);
-  return val;
+function optional(name: string): string {
+  return (import.meta.env as Record<string, string | undefined>)[name] ?? '';
 }
 
 export const ENV = {
   upstash: {
-    url: must('VITE_UPSTASH_REDIS_REST_URL'),
-    token: must('VITE_UPSTASH_REDIS_REST_TOKEN'),
+    url: optional('VITE_UPSTASH_REDIS_REST_URL'),
+    token: optional('VITE_UPSTASH_REDIS_REST_TOKEN'),
   },
 };

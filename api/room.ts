@@ -4,6 +4,7 @@ import {
   createRoomWithStores,
   getRoomWithStores,
   joinRoomWithStores,
+  verifyHostClaimWithStores,
   setListenUntilWithStores,
   RoomNotFoundError,
   HostNameTakenError,
@@ -97,6 +98,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         return;
       }
 
+      case 'verify-host': {
+        const code = body.code as string;
+        const hostKey = body.hostKey as string | undefined;
+
+        if (!code) {
+          res.status(400).json({ error: 'InvalidRequest', message: 'Missing code' });
+          return;
+        }
+
+        await verifyHostClaimWithStores(stores, code, { hostKey });
+        res.status(200).json({});
+        return;
+      }
       case 'join': {
         const code = body.code as string;
         const participant = body.participant as Participant;
