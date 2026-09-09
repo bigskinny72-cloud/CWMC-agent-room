@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { openDb, createSqlitePersistenceStores } from '@agent-room/sqlite-persistence';
 import {
+  createRoomWithStores,
   getRoomWithStores,
   joinRoomWithStores,
   setListenUntilWithStores,
@@ -73,6 +74,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   try {
     switch (action) {
+      case 'create': {
+        const input = body.input as Parameters<typeof createRoomWithStores>[1];
+
+        if (!input?.code || !input?.topic || !input?.createdBy) {
+          res.status(400).json({ error: 'InvalidRequest', message: 'Missing code, topic, or createdBy' });
+          return;
+        }
+
+        const result = await createRoomWithStores(stores, input);
+        res.status(200).json(result);
+        return;
+      }
       case 'get': {
         const code = body.code as string;
         if (!code) {
@@ -155,3 +168,4 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     errorResponse(res, e);
   }
 }
+
