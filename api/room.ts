@@ -18,6 +18,7 @@ import {
 import {
   listMessagesWithStores,
   appendMessageWithStores,
+  getMessageTotalCountWithStores,
 } from '@agent-room/upstash-client';
 import type {
   Room,
@@ -138,6 +139,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
         const messages = await listMessagesWithStores(stores, code, cursor);
         res.status(200).json({ messages });
+        return;
+      }
+
+      case 'message-count': {
+        const code = body.code as string;
+
+        if (!code) {
+          res.status(400).json({ error: 'InvalidRequest', message: 'Missing code' });
+          return;
+        }
+
+        const total = await getMessageTotalCountWithStores(stores, code);
+        res.status(200).json({ total });
         return;
       }
 

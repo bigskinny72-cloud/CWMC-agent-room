@@ -8,14 +8,12 @@ import {
   ROOM_POLL_HIDDEN_MS,
 } from '@agent-room/shared';
 import {
-  createClient,
   getRoom,
   listMessages,
   appendMessage,
   updatePresence,
   getMessageTotalCount,
-} from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+} from '../lib/roomApi.js';
 
 interface UseRoomState {
   room: Room | null;
@@ -26,7 +24,6 @@ interface UseRoomState {
 export function useRoom(code: string, selfName: string) {
   const [state, setState] = useState<UseRoomState>({ room: null, messages: [], error: null });
   const cursor = useRef(0);
-  const clientRef = useRef(createClient(ENV.upstash));
 
   // In-flight guard with TIMEOUT escape hatch. Two failure modes we hit:
   //
@@ -56,7 +53,7 @@ export function useRoom(code: string, selfName: string) {
     const startedAt = Date.now();
     console.debug(traceTag, 'pullMessages.fire', { cursor: cursor.current, t: startedAt });
     try {
-      const fresh = await listMessages(clientRef.current, code, cursor.current);
+      const fresh = await listMessages(code, cursor.current);
       console.debug(traceTag, 'pullMessages.fetched', {
         fresh: fresh.length,
         ms: Date.now() - startedAt,
@@ -69,10 +66,10 @@ export function useRoom(code: string, selfName: string) {
         // the server's absolute counter (network race / earlier bug /
         // clock skew), every future poll returns [] forever. Detect
         // and reset.
-        const total = await getMessageTotalCount(clientRef.current, code);
+        const total = await getMessageTotalCount(code);
         if (total !== null && cursor.current > total) {
           cursor.current = 0;
-          const recover = await listMessages(clientRef.current, code, 0);
+          const recover = await listMessages(code, 0);
           cursor.current = total;
           setState(s => {
             const seen = new Set(s.messages.map(m => m.id));
@@ -95,7 +92,7 @@ export function useRoom(code: string, selfName: string) {
       // Setting cursor.current = total enforces "we've now seen exactly
       // what the server has" regardless of how the local arithmetic went.
       // Two concurrent polls will both write the same value → no drift.
-      const total = await getMessageTotalCount(clientRef.current, code);
+      const total = await getMessageTotalCount(code);
       cursor.current = total ?? (cursor.current + fresh.length);
       setState(s => {
         const seen = new Set(s.messages.map(m => m.id));
@@ -120,7 +117,7 @@ export function useRoom(code: string, selfName: string) {
 
   const pullRoom = useCallback(async () => {
     try {
-      const r = await getRoom(clientRef.current, code);
+      const r = await getRoom(code);
       setState(s => ({ ...s, room: r }));
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
@@ -144,9 +141,9 @@ export function useRoom(code: string, selfName: string) {
     cursor.current = 0;
     try {
       const [r, fresh, total] = await Promise.all([
-        getRoom(clientRef.current, code),
-        listMessages(clientRef.current, code, 0),
-        getMessageTotalCount(clientRef.current, code),
+        getRoom(code),
+        listMessages(code, 0),
+        getMessageTotalCount(code),
       ]);
       // Match server-side logical cursor (counter) so polling stays correct after LTRIM; legacy rooms fall back.
       cursor.current = total ?? fresh.length;
@@ -179,7 +176,7 @@ export function useRoom(code: string, selfName: string) {
       msgTimer = setInterval(pullMessages, msgMs);
       roomTimer = setInterval(pullRoom, roomMs);
       hbTimer = setInterval(() => {
-        updatePresence(clientRef.current, code, selfName, Date.now()).catch(() => {});
+        updatePresence(code, selfName, Date.now()).catch(() => {});
       }, HEARTBEAT_MS);
     };
 
@@ -239,7 +236,7 @@ export function useRoom(code: string, selfName: string) {
     });
 
     try {
-      await appendMessage(clientRef.current, code, msg);
+      await appendMessage(code, msg);
       await pullMessages();
     } catch (e) {
       // Roll back the optimistic add — server didn't accept the message.

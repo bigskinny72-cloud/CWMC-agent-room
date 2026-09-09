@@ -1,4 +1,4 @@
-import type { ClientKind, Participant, Room } from '@agent-room/shared';
+import type { ClientKind, Message, Participant, Room } from '@agent-room/shared';
 
 export interface CreateRoomInput {
   code: string;
@@ -70,5 +70,49 @@ export async function joinRoom(
     code,
     participant,
     priorIdentity: options?.priorIdentity,
+  });
+}
+export async function listMessages(code: string, cursor: number): Promise<Message[]> {
+  const result = await roomApi<{ messages: Message[] }>({
+    action: 'messages',
+    code,
+    cursor,
+  });
+
+  return result.messages;
+}
+
+export async function getMessageTotalCount(code: string): Promise<number | null> {
+  const result = await roomApi<{ total: number | null }>({
+    action: 'message-count',
+    code,
+  });
+
+  return result.total;
+}
+
+export async function appendMessage(
+  code: string,
+  message: Message,
+  kind: 'message' | 'status' = 'message',
+): Promise<void> {
+  await roomApi<unknown>({
+    action: 'send',
+    code,
+    message,
+    kind,
+  });
+}
+
+export async function updatePresence(
+  code: string,
+  name: string,
+  until: number,
+): Promise<void> {
+  await roomApi<unknown>({
+    action: 'presence',
+    code,
+    name,
+    until,
   });
 }
