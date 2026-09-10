@@ -37,9 +37,9 @@ vi.mock('../src/roomApi.js', async importOriginal => {
   const actual = await importOriginal<any>();
   const participant = { name: 'Tester', client: 'cc', canSpeak: true };
   const room = { code: 'TEST-ONLY', topic: 'test', status: 'active', replyMode: 'open', participants: [participant], participant, createdBy: 'Host' };
-  return { ...actual, createRoomApiClient: () => ({}), getRoom: async () => room, joinRoom: vi.fn(async () => room), listMessages: vi.fn(async () => []), appendMessage: vi.fn(async () => ({})), setListenUntil: vi.fn(async () => {}), getTaskBoard: async () => null };
+  return { ...actual, createRoomApiClient: () => ({}), getRoom: async () => room, joinRoom: vi.fn(async () => room), listMessages: vi.fn(async () => []), readMessages: vi.fn(async () => ({ messages: [], cursor: 0 })), appendMessage: vi.fn(async () => ({})), setListenUntil: vi.fn(async () => {}), getTaskBoard: async () => null };
 });
-vi.mock('../src/state.js', () => ({ setRoom: vi.fn(), removeRoom: vi.fn(), updateCursor: vi.fn(), markSent: vi.fn(), readState: async () => ({ rooms: {} }), readRoomStateForJoin: async () => undefined }));
+vi.mock('../src/state.js', () => ({ setRoom: vi.fn(), removeRoom: vi.fn(), updateCursor: vi.fn(), markSent: vi.fn(), readState: async () => ({ rooms: { 'TEST-ONLY': { cursor: 7 } } }), readRoomStateForJoin: async () => undefined }));
 
 it('joins without polling, posts, and returns after a quiet listen', async () => {
   vi.stubEnv('AGENT_ROOM_HARNESS', 'chatgpt');
@@ -47,6 +47,7 @@ it('joins without polling, posts, and returns after a quiet listen', async () =>
   const { CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
   const { registerTools } = await import('../src/tools.js');
   const api = await import('../src/roomApi.js');
+  const state = await import('../src/state.js');
   const handlers = new Map();
   registerTools({ setRequestHandler: (schema: unknown, handler: unknown) => handlers.set(schema, handler), sendLoggingMessage: async () => {} } as any);
   const call = async (name: string, args: any) => JSON.parse((await handlers.get(CallToolRequestSchema)({ params: { name, arguments: { code: 'TEST-ONLY', name: 'Tester', ...args } } })).content[0].text);
@@ -55,8 +56,15 @@ it('joins without polling, posts, and returns after a quiet listen', async () =>
   expect(api.setListenUntil).not.toHaveBeenCalled();
   expect(joined.hint).toContain('return to the user');
   expect(joined.autoWatchStarted).toBe(false);
+  vi.mocked(state.updateCursor).mockClear();
   const sent = await call('room_send', { text: 'test' });
+  expect(sent.cursor).toBe(7);
+  expect(state.updateCursor).not.toHaveBeenCalled();
   expect(sent.hint).toContain('return to the user');
+  await call('room_status', { text: 'still working' });
+  expect(state.updateCursor).not.toHaveBeenCalled();
+  await call('room_list_messages', { since: 0 });
+  expect(state.updateCursor).not.toHaveBeenCalled();
   vi.useFakeTimers();
   try {
     const listening = call('room_listen', { since: 0, timeoutMs: 1000 });

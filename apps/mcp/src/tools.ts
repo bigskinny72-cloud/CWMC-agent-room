@@ -587,9 +587,10 @@ export function registerTools(server: Server) {
           if (selfName) {
             await setListenUntil(client, code, selfName, Date.now() + 5000);
           }
-          const msgs = await listMessages(client, code, cursor);
+          const read = await readMessages(client, code, cursor);
+          const msgs = read.messages;
           if (msgs.length > 0) {
-            cursor += msgs.length;
+            cursor = read.cursor;
             const others = msgs.filter((m: Message) => !(m.client === 'cc' && m.name === selfName));
             if (others.length > 0) {
               const summary = others.map((m: Message) => `${m.name}: ${m.text}`).join('\n');
@@ -908,16 +909,17 @@ export function registerTools(server: Server) {
         hostKey: created.hostKey,
         priorIdentity: { name: a.name, client: 'cc' },
       });
-      const msgs = await listMessages(client, code, 0);
+      const initialRead = await readMessages(client, code, 0);
+      const msgs = initialRead.messages;
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
-      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey });
+      await setRoom(code, { name: a.name, cursor: initialRead.cursor, joinedAt: Date.now(), hostKey: created.hostKey });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
       if (listenAfterJoin) {
-        const first = await runRoomListenPoll(client, code, msgs.length, listenMs, a.name);
+        const first = await runRoomListenPoll(client, code, initialRead.cursor, listenMs, a.name);
         await updateCursor(code, first.cursor);
         if (!first.terminated && shouldAutoWatch) {
           startRoomWatcher(code, a.name, first.cursor);
@@ -946,7 +948,7 @@ export function registerTools(server: Server) {
       return ok({
         code,
         topic: created.topic,
-        cursor: msgs.length,
+        cursor: initialRead.cursor,
         joinUrl: `https://www.agent-room.com/j/${code}`,
         roleBrief: roleBriefFor(a.role ?? ''),
         ...(created.projectPrompt ? { projectPrompt: created.projectPrompt, projectPromptVersion: created.projectPromptVersion ?? 1 } : {}),
@@ -1021,8 +1023,9 @@ export function registerTools(server: Server) {
           await appendMessage(client, a.code, greeting);
         } catch { /* greeting is nice-to-have; join/listen must still proceed */ }
       }
-      const msgs = await listMessages(client, a.code, 0);
-      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now() });
+      const initialRead = await readMessages(client, a.code, 0);
+      const msgs = initialRead.messages;
+      await setRoom(a.code, { name: finalName, cursor: initialRead.cursor, joinedAt: Date.now() });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,
@@ -1041,7 +1044,7 @@ export function registerTools(server: Server) {
       const joinSnapshot = await readReplyModeSnapshot(client, updated, finalName);
 
       if (listenAfterJoin) {
-        const first = await runRoomListenPoll(client, a.code, msgs.length, listenMs, finalName);
+        const first = await runRoomListenPoll(client, a.code, initialRead.cursor, listenMs, finalName);
         await updateCursor(a.code, first.cursor);
         if (!first.terminated && shouldAutoWatch) {
           startRoomWatcher(a.code, finalName, first.cursor);
@@ -1102,7 +1105,7 @@ export function registerTools(server: Server) {
           listenUntil: p.listenUntil,
           canSpeak: p.canSpeak !== false,
         })),
-        cursor: msgs.length,
+        cursor: initialRead.cursor,
         recentMessages,
         roleBrief: roleBriefFor(a.role ?? ''),
         ...(updated.projectPrompt ? { projectPrompt: updated.projectPrompt, projectPromptVersion: updated.projectPromptVersion ?? 1 } : {}),
@@ -1112,8 +1115,8 @@ export function registerTools(server: Server) {
         autoWatchStarted: shouldAutoWatch,
         clientKind: harness.kind,
         hint: muted
-          ? `Joined as "${finalName}" — but the host (${updated.createdBy}) has muted you in this room. room_send will return error="muted" until you're unmuted. Call room_listen to read the conversation while you wait. ${nextListenContract(a.code, msgs.length)}${persistenceNudge}`
-          : `Joined as "${finalName}". ${recentMessages.length} recent messages above for context. ${nextListenContract(a.code, msgs.length)}${persistenceNudge}`,
+          ? `Joined as "${finalName}" — but the host (${updated.createdBy}) has muted you in this room. room_send will return error="muted" until you're unmuted. Call room_listen to read the conversation while you wait. ${nextListenContract(a.code, initialRead.cursor)}${persistenceNudge}`
+          : `Joined as "${finalName}". ${recentMessages.length} recent messages above for context. ${nextListenContract(a.code, initialRead.cursor)}${persistenceNudge}`,
       });
     }
 
@@ -1207,9 +1210,9 @@ export function registerTools(server: Server) {
         }
         throw e;
       }
-      const msgs = await listMessages(client, a.code, 0);
-      // Advance cursor past our own message so the Stop hook does not re-inject it.
-      await updateCursor(a.code, msgs.length);
+      // Sending is not acknowledgement of unread inbound work. Keep the
+      // durable cursor where actual delivery/processing last left it.
+      const cursor = (await readState()).rooms[a.code]?.cursor ?? 0;
       // Record send-time so the Stop hook will hold briefly waiting for a reply.
       await markSent(a.code, Date.now());
       // Supplement-skip token (`__no_addition__`) is consumed by the turn
@@ -1221,18 +1224,18 @@ export function registerTools(server: Server) {
           sent: true,
           appended: false,
           reason: 'no_addition',
-          cursor: msgs.length,
+          cursor,
           metadata: appendResult.metadata,
-          hint: `Your "${"__no_addition__"}" was accepted — the supplement role was skipped without posting a message. ${nextListenContract(a.code, msgs.length)}`,
+          hint: `Your "${"__no_addition__"}" was accepted — the supplement role was skipped without posting a message. ${nextListenContract(a.code, cursor)}`,
         });
       }
       return ok({
         sent: true,
         appended: true,
-        cursor: msgs.length,
+        cursor,
         ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
         ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
-        hint: `Sent. ${nextListenContract(a.code, msgs.length)}`,
+        hint: `Sent. ${nextListenContract(a.code, cursor)}`,
       });
     }
 
@@ -1293,27 +1296,27 @@ export function registerTools(server: Server) {
         }
         throw e;
       }
-      const msgs = await listMessages(client, a.code, 0);
-      await updateCursor(a.code, msgs.length);
+      // A status heartbeat also must not acknowledge unread inbound work.
+      const cursor = (await readState()).rooms[a.code]?.cursor ?? 0;
       await markSent(a.code, Date.now());
       const extended = appendResult.metadata?.extendsTurn === true;
       return ok({
         sent: true,
         appended: true,
-        cursor: msgs.length,
+        cursor,
         extendsTurn: extended,
         ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
         ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
         hint: extended
-          ? `Status posted — your turn deadline was renewed. Keep working; send another room_status before it lapses if you need more time, or room_send your result when done. ${nextListenContract(a.code, msgs.length)}`
-          : `Status posted (no turn change). ${nextListenContract(a.code, msgs.length)}`,
+          ? `Status posted — your turn deadline was renewed. Keep working; send another room_status before it lapses if you need more time, or room_send your result when done. ${nextListenContract(a.code, cursor)}`
+          : `Status posted (no turn change). ${nextListenContract(a.code, cursor)}`,
       });
     }
 
     if (name === 'room_list_messages') {
       const since = typeof a.since === 'number' ? a.since : 0;
       const read = await readMessages(client, a.code, since);
-      await updateCursor(a.code, read.cursor);
+      // History inspection is observation, not acknowledgement.
       return ok({ messages: read.messages, cursor: read.cursor });
     }
 
