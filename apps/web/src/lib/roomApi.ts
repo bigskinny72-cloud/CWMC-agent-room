@@ -58,14 +58,18 @@ export async function verifyHostKey(
   });
 }
 
+export interface JoinRoomResult {
+  participant: Participant;
+}
+
 export async function joinRoom(
   code: string,
   participant: Participant,
   options?: {
     priorIdentity?: { name: string; client: ClientKind };
   },
-): Promise<void> {
-  await roomApi<unknown>({
+): Promise<JoinRoomResult> {
+  return roomApi<JoinRoomResult>({
     action: 'join',
     code,
     participant,
@@ -115,4 +119,16 @@ export async function updatePresence(
     name,
     until,
   });
+}
+
+export async function removeParticipant(
+  code: string,
+  requesterName: string,
+  targetName: string,
+  targetClient: 'web' | 'cc',
+): Promise<Room> {
+  const result = await roomApi<{ room: Room }>({
+    action: 'remove-participant', code, requesterName, targetName, targetClient,
+  });
+  return result.room;
 }

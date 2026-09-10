@@ -3,6 +3,7 @@ import { openDb, createSqlitePersistenceStores } from '@agent-room/sqlite-persis
 import {
   createRoomWithStores,
   getRoomWithStores,
+  removeParticipantWithStores,
   joinRoomWithStores,
   verifyHostClaimWithStores,
   setListenUntilWithStores,
@@ -95,6 +96,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
         const room = await getRoomWithStores(stores, code);
+        res.status(200).json({ room });
+        return;
+      }
+
+      case 'remove-participant': {
+        const { code, requesterName, targetName, targetClient } = body;
+        if (typeof code !== 'string' || !code ||
+            typeof requesterName !== 'string' || !requesterName ||
+            typeof targetName !== 'string' || !targetName ||
+            (targetClient !== 'web' && targetClient !== 'cc')) {
+          res.status(400).json({ error: 'InvalidRequest', message: 'Missing or invalid code, requesterName, targetName, or targetClient' });
+          return;
+        }
+        const room = await removeParticipantWithStores(stores, code, requesterName, targetName, targetClient);
         res.status(200).json({ room });
         return;
       }

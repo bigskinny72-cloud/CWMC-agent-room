@@ -597,14 +597,14 @@ export class NotHostError extends Error {
   }
 }
 
-export async function removeParticipant(
-  client: UpstashClient,
+export async function removeParticipantWithStores(
+  stores: PersistenceStores,
   code: string,
   requesterName: string,
   targetName: string,
   targetClient: 'web' | 'cc'
 ): Promise<Room> {
-  return casRoom(client, code, (current) => {
+  return casRoomWithStores(stores, code, (current) => {
     // Self-removal is always allowed — agents that finish their turn or
     // were told to leave call this with requesterName === targetName.
     // Removing someone else still requires the host slot.
@@ -619,6 +619,18 @@ export async function removeParticipant(
       ),
     };
   });
+}
+
+export async function removeParticipant(
+  client: UpstashClient,
+  code: string,
+  requesterName: string,
+  targetName: string,
+  targetClient: 'web' | 'cc'
+): Promise<Room> {
+  return removeParticipantWithStores(
+    createUpstashPersistenceStores(client), code, requesterName, targetName, targetClient
+  );
 }
 
 // Silent no-op if the named participant is not in the room. In practice the

@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect, useCallback, type ClipboardEvent, type DragEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { removeParticipant } from '../lib/roomApi.js';
 import { useRoom } from '../hooks/useRoom.js';
 import { Bubble } from '../components/Bubble.js';
 import { VoiceButton } from '../components/VoiceButton.js';
@@ -8,7 +9,7 @@ import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
-import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, type TurnState } from '@agent-room/upstash-client';
+import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, type TurnState } from '@agent-room/upstash-client';
 import { ENV } from '../env.js';
 import { copyText } from '../lib/copy.js';
 import { templateById } from '../lib/templates.js';
@@ -260,8 +261,7 @@ export function Room() {
     if (p.name === self.name && p.client === 'web') return; // host can't kick themselves
     if (!confirm(`Remove ${p.name} (${p.client}) from the room?`)) return;
     try {
-      const client = createClient(ENV.upstash);
-      await removeParticipant(client, code, self.name, p.name, p.client);
+      await removeParticipant(code, self.name, p.name, p.client);
       await refreshRoom();
     } catch (e) {
       const { showToast } = await import('../components/Toast.js');

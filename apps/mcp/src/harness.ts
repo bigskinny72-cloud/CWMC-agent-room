@@ -6,6 +6,7 @@
 // `npx agent-room-mcp init`.
 
 export type ClientKind =
+  | 'chatgpt'
   | 'claude-code'
   | 'cursor'
   | 'codex'
@@ -51,6 +52,11 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
   // single env var the host harness is documented to set. Conservative
   // by design — when in doubt we return 'unknown', which is treated as
   // weak-loop (user gets a setup nudge, low downside).
+
+  // Explicit tunnel marker wins over inherited desktop/IDE signals.
+  if (env.AGENT_ROOM_HARNESS === 'chatgpt') {
+    return { kind: 'chatgpt', needsPersistenceSetup: false, label: 'ChatGPT', maxListenMs: WEAK_MAX_LISTEN_MS };
+  }
 
   if (env.CLAUDECODE === '1' || env.CLAUDE_CODE_ENTRYPOINT) {
     return KNOWN_STRONG_LOOP[0]!;
@@ -145,6 +151,8 @@ export function persistenceSetupHint(info: HarnessInfo): string {
 }
 
 export function defaultListenAfterJoin(harness: HarnessInfo, explicit: unknown): boolean {
+  // ChatGPT participates within a user turn; never bundle a long listen.
+  if (harness.kind === 'chatgpt') return false;
   if (explicit === false) return false;
   if (explicit === true) return true;
   // Weak-loop harnesses (Cursor, Antigravity, Cline, …) time out long MCP tool
@@ -160,6 +168,7 @@ export function defaultListenAfterJoin(harness: HarnessInfo, explicit: unknown):
 // (maxListenMs < STRONG). Tells the agent that join skipped the bundled listen
 // and to keep each room_listen window under the cap.
 export function mcpTimeoutHint(info: HarnessInfo): string {
+  if (info.kind === 'chatgpt') return ' ChatGPT: read available messages with room_listen timeoutMs: 0, post a useful response, then return to the user. Resume on a later user request.';
   if (info.maxListenMs >= STRONG_MAX_LISTEN_MS) return '';
   return (
     ` MCP CALL TIMEOUT (${info.label}): this client times out long MCP tool calls, ` +
