@@ -47,12 +47,7 @@ export function openDb(path: string, mode: DbOpenMode = 'open'): Database.Databa
     throw new Error('In-memory database (:memory:) is not allowed in production. Provide an explicit file path.');
   }
 
-  // Ensure parent directory exists
   const parentDir = dirname(path);
-  if (!existsSync(parentDir)) {
-    mkdirSync(parentDir, { recursive: true });
-  }
-
   const fileExists = existsSync(path);
 
   if (mode === 'create' && fileExists) {
@@ -61,6 +56,11 @@ export function openDb(path: string, mode: DbOpenMode = 'open'): Database.Databa
 
   if (mode === 'open' && !fileExists) {
     throw new Error(`Database not found at ${path}. Use 'create' mode to initialize a new database.`);
+  }
+
+  // Creating may create its parent. Opening must not manufacture paths on failure.
+  if (mode === 'create' && !existsSync(parentDir)) {
+    mkdirSync(parentDir, { recursive: true });
   }
 
   try {
@@ -72,6 +72,12 @@ export function openDb(path: string, mode: DbOpenMode = 'open'): Database.Databa
 
     // Set busy timeout
     db.pragma('busy_timeout = 5000');
+
+    // Detect damaged SQLite pages before trusting schema/version metadata.
+    const quickCheck = db.pragma('quick_check', { simple: true }) as string;
+    if (quickCheck !== 'ok') {
+      throw new Error(`SQLite quick_check failed: ${quickCheck}`);
+    }
 
     // Verify/initialize schema
     const currentVersion = db.pragma('user_version', { simple: true }) as number;
@@ -92,18 +98,43 @@ export function openDb(path: string, mode: DbOpenMode = 'open'): Database.Databa
       // Schema upgrade needed
       runMigrations();
     }
-    // currentVersion === CURRENT_SCHEMA_VERSION: nothing to do
+    // currentVersion === CURRENT_SCHEMA_VERSION: nothing to migrate.
+    validateRequiredSchema();
 
     return db;
   } catch (err) {
-    // Fail closed: if we can't open the database, throw
-    // The caller must handle this - do not silently create an empty replacement
+    // Fail closed: release any partially-open handle and never silently create
+    // an empty replacement. A leaked handle can also block backup/recovery.
+    try { db?.close(); } catch { /* preserve the original startup error */ }
     db = null;
     dbPath = null;
     throw new Error(`Failed to open SQLite database: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
+const REQUIRED_SCHEMA = {
+  rooms: ['code', 'roomJson', 'version'],
+  messages: ['code', 'seq', 'messageJson'],
+  message_counts: ['code', 'totalCount'],
+  turn_state: ['code', 'stateJson'],
+  task_boards: ['code', 'boardJson', 'version'],
+  board_rooms: ['code'],
+  webhooks: ['code', 'hooksJson'],
+  reports: ['code', 'reportJson', 'expiresAt'],
+  sweep_claims: ['code', 'identity', 'expiresAt'],
+} as const;
+
+function validateRequiredSchema(): void {
+  if (!db) throw new Error('Database not open');
+  const findTable = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`);
+  for (const [table, requiredColumns] of Object.entries(REQUIRED_SCHEMA)) {
+    if (!findTable.get(table)) throw new Error(`Database schema is missing required table: ${table}`);
+    const columns = new Set((db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name));
+    for (const column of requiredColumns) {
+      if (!columns.has(column)) throw new Error(`Database schema table ${table} is missing required column: ${column}`);
+    }
+  }
+}
 /**
  * Run all schema migrations up to CURRENT_SCHEMA_VERSION.
  * Runs in a single transaction; on success, updates PRAGMA user_version.
