@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { artifactLabel, extractArtifacts, normalizeEscapedWhitespace, type ArtifactKind, type Message, type RoomArtifact, type RoomReport } from '@agent-room/shared';
-import { createClient, createRoomReport, getRoom, getRoomReport, listMessages } from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+import { createRoomReport, getRoomReport } from '../lib/roomApi.js';
 
 export function Report() {
   const { code = '' } = useParams();
@@ -12,8 +11,7 @@ export function Report() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    const client = createClient(ENV.upstash);
-    getRoomReport(client, code)
+    getRoomReport(code)
       .then(found => {
         setReport(found);
         setMissing(!found);
@@ -25,10 +23,7 @@ export function Report() {
     setRefreshing(true);
     setError(null);
     try {
-      const client = createClient(ENV.upstash);
-      const room = await getRoom(client, code);
-      const messages = await listMessages(client, code, 0);
-      const next = await createRoomReport(client, room, messages);
+      const next = await createRoomReport(code);
       setReport(next);
       setMissing(false);
     } catch (e) {

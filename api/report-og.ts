@@ -1,11 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-// Hotfix: see api/report-page.ts for the full rationale. Same workspace-
-// import problem (`@agent-room/upstash-client` ships TypeScript source
-// via `"main": "./src/index.ts"`, which Node can't load at runtime), so
-// the import was crashing the function before the handler ran. This
-// inlines a minimal Upstash REST GET + the report-shape subset we
-// actually consult.
+import { getRoomReport } from './room.js';
 
 const FALLBACK_TITLE = 'Agent Room Report';
 const FALLBACK_DESCRIPTION = 'A shareable meeting asset from a multi-agent collaboration room.';
@@ -21,45 +16,6 @@ interface MiniReport {
   exportedAt?: number;
   messageCount?: number;
   participants?: MiniParticipant[];
-}
-
-async function getRoomReportRaw(
-  url: string,
-  token: string,
-  code: string
-): Promise<MiniReport | null> {
-  let resp: Response;
-  try {
-    resp = await fetch(`${url.replace(/\/$/, '')}/get/room-report:${encodeURIComponent(code)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-  } catch {
-    return null;
-  }
-  if (!resp.ok) return null;
-  let body: { result?: string | null };
-  try {
-    body = (await resp.json()) as { result?: string | null };
-  } catch {
-    return null;
-  }
-  if (!body.result) return null;
-  try {
-    return JSON.parse(body.result) as MiniReport;
-  } catch {
-    return null;
-  }
-}
-
-function readUpstashEnv(): { url: string; token: string } | { missing: string[] } {
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.VITE_UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.VITE_UPSTASH_REDIS_REST_TOKEN;
-  const missing = [
-    !url ? 'UPSTASH_REDIS_REST_URL' : '',
-    !token ? 'UPSTASH_REDIS_REST_TOKEN' : '',
-  ].filter(Boolean);
-  if (missing.length) return { missing };
-  return { url: url!, token: token! };
 }
 
 function roomCode(value: unknown): string | null {
@@ -147,11 +103,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const env = readUpstashEnv();
-  let report: MiniReport | null = null;
-  if (!('missing' in env)) {
-    report = await getRoomReportRaw(env.url, env.token, code).catch(() => null);
-  }
+  const report = await getRoomReport(code);
 
   res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=300');

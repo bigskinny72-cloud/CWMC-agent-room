@@ -398,15 +398,15 @@ export async function verifyHostKey(
 // presence (visibility, ability to read) is unaffected. Unmute flips back
 // to true. Idempotent — calling with the same value bumps version but is
 // a no-op for the participant row.
-export async function setMuted(
-  client: UpstashClient,
+export async function setMutedWithStores(
+  stores: PersistenceStores,
   code: string,
   requesterName: string,
   targetName: string,
   targetClient: 'web' | 'cc',
   muted: boolean,
 ): Promise<Room> {
-  return casRoom(client, code, (current) => {
+  return casRoomWithStores(stores, code, (current) => {
     if (current.createdBy !== requesterName) {
       throw new NotHostError(requesterName, current.createdBy);
     }
@@ -419,6 +419,17 @@ export async function setMuted(
       ),
     };
   });
+}
+
+export async function setMuted(
+  client: UpstashClient,
+  code: string,
+  requesterName: string,
+  targetName: string,
+  targetClient: 'web' | 'cc',
+  muted: boolean,
+): Promise<Room> {
+  return setMutedWithStores(createUpstashPersistenceStores(client), code, requesterName, targetName, targetClient, muted);
 }
 
 /**
@@ -486,14 +497,14 @@ function isInterviewTopicValue(topic: string): boolean {
   return topic.toLowerCase().includes('interview');
 }
 
-export async function setReplyMode(
-  client: UpstashClient,
+export async function setReplyModeWithStores(
+  stores: PersistenceStores,
   code: string,
   requesterName: string,
   mode: ReplyMode,
   config: ReplyModeConfig | undefined,
 ): Promise<Room> {
-  const updated = await casRoom(client, code, (current) => {
+  const updated = await casRoomWithStores(stores, code, (current) => {
     if (current.createdBy !== requesterName) {
       throw new NotHostError(requesterName, current.createdBy);
     }
@@ -535,8 +546,18 @@ export async function setReplyMode(
   // overwrite via newSequentialTurn / moderator startup anyway. Keeping
   // it out of the CAS mutator avoids cyclic imports and keeps the room
   // module unaware of turnState internals.
-  await createUpstashPersistenceStores(client).turnState.clearTurnState(code);
+  await stores.turnState.clearTurnState(code);
   return updated;
+}
+
+export async function setReplyMode(
+  client: UpstashClient,
+  code: string,
+  requesterName: string,
+  mode: ReplyMode,
+  config: ReplyModeConfig | undefined,
+): Promise<Room> {
+  return setReplyModeWithStores(createUpstashPersistenceStores(client), code, requesterName, mode, config);
 }
 
 // Set or clear the room's host-editable project prompt. An empty string
@@ -637,14 +658,32 @@ export async function removeParticipant(
 // caller passes its own name from session state, so a miss means the user was
 // removed externally — we just skip the heartbeat. version still bumps so
 // drift remains visible if it ever matters.
+export async function endRoomWithStores(
+  stores: PersistenceStores,
+  code: string,
+): Promise<Room> {
+  return casRoomWithStores(stores, code, (current) => ({
+    ...current,
+    status: 'ended' as const,
+    endedAt: Date.now(),
+  }));
+}
+
 export async function endRoom(
   client: UpstashClient,
   code: string,
 ): Promise<Room> {
-  return casRoom(client, code, (current) => ({
+  return endRoomWithStores(createUpstashPersistenceStores(client), code);
+}
+
+export async function reactivateRoomWithStores(
+  stores: PersistenceStores,
+  code: string,
+): Promise<Room> {
+  return casRoomWithStores(stores, code, (current) => ({
     ...current,
-    status: 'ended' as const,
-    endedAt: Date.now(),
+    status: 'active' as const,
+    endedAt: undefined,
   }));
 }
 
@@ -652,11 +691,7 @@ export async function reactivateRoom(
   client: UpstashClient,
   code: string,
 ): Promise<Room> {
-  return casRoom(client, code, (current) => ({
-    ...current,
-    status: 'active' as const,
-    endedAt: undefined,
-  }));
+  return reactivateRoomWithStores(createUpstashPersistenceStores(client), code);
 }
 
 export async function updatePresence(

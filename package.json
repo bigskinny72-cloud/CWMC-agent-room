@@ -7,7 +7,8 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "npm -ws run test --if-present",
+    "test": "npm run test:api && npm -ws run test --if-present",
+    "test:api": "vitest run api",
     "build": "npm -ws run build --if-present",
     "dev:web": "npm -w apps/web run dev"
   },

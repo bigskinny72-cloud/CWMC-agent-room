@@ -14,6 +14,8 @@ if (!process.env.AGENT_ROOM_SQLITE_PATH) {
 }
 
 const { default: roomHandler } = await import('./api/room.ts');
+const { default: reportPageHandler } = await import('./api/report-page.ts');
+const { default: reportOgHandler } = await import('./api/report-og.ts');
 
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -67,12 +69,21 @@ function makeVercelResponse(res) {
     return res;
   };
 
+  res.send = function (value) { res.end(value); return res; };
+
   return res;
 }
 
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+    if (url.pathname === '/api/report-page' || url.pathname === '/api/report-og') {
+      req.query = Object.fromEntries(url.searchParams);
+      const handler = url.pathname === '/api/report-page' ? reportPageHandler : reportOgHandler;
+      await handler(req, makeVercelResponse(res));
+      return;
+    }
 
     if (url.pathname === '/api/room') {
       let body = {};

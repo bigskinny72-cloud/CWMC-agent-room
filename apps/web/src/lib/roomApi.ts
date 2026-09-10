@@ -1,4 +1,5 @@
-import type { ClientKind, Message, Participant, Room } from '@agent-room/shared';
+import type { ClientKind, Message, Participant, Room, RoomReport, ReplyMode, ReplyModeConfig, TurnState, TurnSpokenEntry } from '@agent-room/shared';
+export type { TurnState } from '@agent-room/shared';
 
 export interface CreateRoomInput {
   code: string;
@@ -131,4 +132,50 @@ export async function removeParticipant(
     action: 'remove-participant', code, requesterName, targetName, targetClient,
   });
   return result.room;
+}
+
+function hostRequest<T>(code: string, requesterName: string, payload: Record<string, unknown>): Promise<T> {
+  const hostKey = localStorage.getItem(`room:${code}:hostKey`)
+    ?? sessionStorage.getItem(`room:${code}:hostKey`) ?? undefined;
+  return roomApi<T>({ ...payload, code, requesterName, hostKey });
+}
+
+export async function setMuted(code: string, requesterName: string, targetName: string, targetClient: ClientKind, muted: boolean): Promise<Room> {
+  return (await hostRequest<{ room: Room }>(code, requesterName, { action: 'setMuted', targetName, targetClient, muted })).room;
+}
+
+export async function endRoom(code: string, requesterName: string): Promise<Room> {
+  return (await hostRequest<{ room: Room }>(code, requesterName, { action: 'end' })).room;
+}
+
+export async function reactivateRoom(code: string, requesterName: string): Promise<Room> {
+  return (await hostRequest<{ room: Room }>(code, requesterName, { action: 'reactivate' })).room;
+}
+
+export async function setReplyMode(code: string, requesterName: string, mode: ReplyMode, config: ReplyModeConfig | undefined): Promise<Room> {
+  return (await hostRequest<{ room: Room }>(code, requesterName, { action: 'setReplyMode', mode, config })).room;
+}
+
+export async function getTurnState(code: string): Promise<TurnState | null> {
+  return (await roomApi<{ turnState: TurnState | null }>({ action: 'turnState', code })).turnState;
+}
+
+export async function directInvoke(code: string, requesterName: string, target: { name: string; client: ClientKind }, source: 'host' | 'moderator'): Promise<boolean> {
+  return (await hostRequest<{ added: boolean }>(code, requesterName, { action: 'directInvoke', target, source })).added;
+}
+
+export async function hostSkipCurrent(code: string, requesterName: string): Promise<TurnSpokenEntry | null> {
+  return (await hostRequest<{ skipped: TurnSpokenEntry | null }>(code, requesterName, { action: 'skipCurrent' })).skipped;
+}
+
+export async function appendSystemMessage(code: string, requesterName: string, message: Message): Promise<void> {
+  await hostRequest(code, requesterName, { action: 'systemMessage', message });
+}
+
+export async function createRoomReport(code: string): Promise<RoomReport> {
+  return (await roomApi<{ report: RoomReport }>({ action: 'createReport', code })).report;
+}
+
+export async function getRoomReport(code: string): Promise<RoomReport | null> {
+  return (await roomApi<{ report: RoomReport | null }>({ action: 'getReport', code })).report;
 }

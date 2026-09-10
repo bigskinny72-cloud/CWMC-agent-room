@@ -116,14 +116,14 @@ export async function createRoom(
   client: RoomApiClient,
   input: { topic: string; createdBy: string; projectId?: string; projectKey?: string },
 ): Promise<Room & { hostKey: string }> {
-  const body = await client.post<{ room: Room & { hostKey: string }; hostKey: string }>({
+  const body = await client.post<Room & { hostKey: string }>({
     action: 'create',
     topic: input.topic,
     createdBy: input.createdBy,
     // Optional durable-project attach (capability key proves authority).
     ...(input.projectId ? { projectId: input.projectId, projectKey: input.projectKey } : {}),
   });
-  return { ...body.room, hostKey: body.hostKey };
+  return body;
 }
 
 export async function getRoom(client: RoomApiClient, code: string): Promise<Room> {
@@ -212,7 +212,7 @@ export async function removeParticipant(
   hostKey?: string,
 ): Promise<Room> {
   const body = await client.post<{ room: Room }>({
-    action: 'removeParticipant',
+    action: 'remove-participant',
     code,
     requesterName,
     targetName,

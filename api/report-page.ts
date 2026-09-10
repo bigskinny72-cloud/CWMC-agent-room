@@ -1,15 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-// Hotfix: dropped the `@agent-room/upstash-client` + `@agent-room/shared`
-// workspace imports because both packages publish `"main": "./src/index.ts"`
-// (TypeScript source). At runtime Vercel serverless functions are plain
-// Node — Node cannot execute `.ts` files, so the import resolves to the
-// raw TS source and the function crashes with FUNCTION_INVOCATION_FAILED
-// before our handler ever runs. Inlining a minimal Upstash REST GET +
-// the report-shape subset we actually read avoids the whole workspace
-// dependency chain. The proper long-term fix is to ship those packages
-// as compiled JS (so the existing imports work in Node), but that's a
-// bigger workspace change; this hotfix unblocks the OG endpoint today.
+import { getRoomReport } from './room.js';
 
 const SITE_URL = 'https://www.agent-room.com';
 
@@ -20,49 +11,6 @@ interface MiniReport {
   topic?: string;
   summary?: string;
   exportedAt?: number;
-}
-
-async function getRoomReportRaw(
-  url: string,
-  token: string,
-  code: string
-): Promise<MiniReport | null> {
-  // Upstash REST: GET /<command>/<arg> returns { result: string | null }.
-  // We store reports as JSON-stringified blobs at key `room-report:<code>`
-  // (see packages/upstash-client/src/reports.ts), so a single GET is all
-  // we need.
-  let resp: Response;
-  try {
-    resp = await fetch(`${url.replace(/\/$/, '')}/get/room-report:${encodeURIComponent(code)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-  } catch {
-    return null;
-  }
-  if (!resp.ok) return null;
-  let body: { result?: string | null };
-  try {
-    body = (await resp.json()) as { result?: string | null };
-  } catch {
-    return null;
-  }
-  if (!body.result) return null;
-  try {
-    return JSON.parse(body.result) as MiniReport;
-  } catch {
-    return null;
-  }
-}
-
-function readUpstashEnv(): { url: string; token: string } | { missing: string[] } {
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.VITE_UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.VITE_UPSTASH_REDIS_REST_TOKEN;
-  const missing = [
-    !url ? 'UPSTASH_REDIS_REST_URL' : '',
-    !token ? 'UPSTASH_REDIS_REST_TOKEN' : '',
-  ].filter(Boolean);
-  if (missing.length) return { missing };
-  return { url: url!, token: token! };
 }
 
 function roomCode(value: unknown): string | null {
@@ -150,11 +98,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const env = readUpstashEnv();
-  let report: MiniReport | null = null;
-  if (!('missing' in env)) {
-    report = await getRoomReportRaw(env.url, env.token, code).catch(() => null);
-  }
+  const report = await getRoomReport(code);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=300');

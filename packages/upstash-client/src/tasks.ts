@@ -1,3 +1,5 @@
+import type { PersistenceStores } from '@agent-room/persistence';
+import { createUpstashPersistenceStores } from './persistenceStores.js';
 // Evidence-gated task board for a room. Lives in its own Redis key
 // (`task-board:{code}`) with the same TTL as the room, like turn state, so the
 // room JSON stays small and the board can churn independently.
@@ -134,8 +136,8 @@ function nextTaskId(board: TaskBoard): string {
   return `T-${String(max + 1).padStart(2, '0')}`;
 }
 
-export async function createTask(
-  client: UpstashClient,
+export async function createTaskWithStores(
+  stores: PersistenceStores,
   code: string,
   input: CreateTaskInput,
   now: number = Date.now(),
@@ -152,7 +154,7 @@ export async function createTask(
     );
   }
   let created: Task;
-  const board = await casTaskBoard(client, code, (current) => {
+  const board = await stores.taskBoards.mutateTaskBoard(code, (current) => {
     const id = input.id?.trim() || nextTaskId(current);
     if (current.tasks.some(t => t.id === id)) throw new TaskExistsError(id);
     created = {
@@ -171,22 +173,31 @@ export async function createTask(
     return { ...current, tasks: [...current.tasks, created], lastProgressAt: now };
   });
   // Index this room for the periodic board-review sweep (best-effort).
-  await registerBoardRoom(client, code).catch(() => { /* best-effort */ });
+  await stores.taskBoards.registerBoardRoom(code).catch(() => { /* best-effort */ });
   return { board, task: created! };
+}
+
+export async function createTask(
+  client: UpstashClient,
+  code: string,
+  input: CreateTaskInput,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  return createTaskWithStores(createUpstashPersistenceStores(client), code, input, now);
 }
 
 // A producer claims a task → 'in_progress'. Records ownership if not already set.
 // Rejects when the claimer is the designated verifier — otherwise owner==verifier
 // and the task can never be verified (T-13 deadlock). Mirrors createTask's guard.
-export async function claimTask(
-  client: UpstashClient,
+export async function claimTaskWithStores(
+  stores: PersistenceStores,
   code: string,
   id: string,
   owner: { name: string; client: ClientKind },
   now: number = Date.now(),
 ): Promise<{ board: TaskBoard; task: Task }> {
   let updated: Task;
-  const board = await casTaskBoard(client, code, (current) => {
+  const board = await stores.taskBoards.mutateTaskBoard(code, (current) => {
     const task = findTask(current, id);
     if (task.state === 'done') {
       throw new TaskStateError(`Task ${id} is already done; reopen it before claiming.`);
@@ -204,6 +215,16 @@ export async function claimTask(
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
   return { board, task: updated! };
+}
+
+export async function claimTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  owner: { name: string; client: ClientKind },
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  return claimTaskWithStores(createUpstashPersistenceStores(client), code, id, owner, now);
 }
 
 // Moderator-mode reassignment: hand a blocked agent's task to a different agent.
@@ -276,8 +297,8 @@ export interface ReassignTaskRolesPatch {
 //   - the RESULTING owner and verifier must differ (the same case-insensitive
 //     guard createTask applies), so a reassignment can never make a task
 //     self-verifiable and defeat the evidence gate.
-export async function reassignTaskRoles(
-  client: UpstashClient,
+export async function reassignTaskRolesWithStores(
+  stores: PersistenceStores,
   code: string,
   id: string,
   patch: ReassignTaskRolesPatch,
@@ -292,7 +313,7 @@ export async function reassignTaskRoles(
     throw new TaskStateError('Reassigning task roles requires a new owner and/or verifier.');
   }
   let updated: Task;
-  const board = await casTaskBoard(client, code, (current) => {
+  const board = await stores.taskBoards.mutateTaskBoard(code, (current) => {
     const task = findTask(current, id);
     if (task.state === 'done') throw new TaskDoneImmutableError(id);
     // Validate the RESULT of applying the patch — a new owner colliding with
@@ -325,6 +346,17 @@ export async function reassignTaskRoles(
   return { board, task: updated! };
 }
 
+export async function reassignTaskRoles(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  patch: ReassignTaskRolesPatch,
+  actor: { name: string; client: ClientKind },
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  return reassignTaskRolesWithStores(createUpstashPersistenceStores(client), code, id, patch, actor, now);
+}
+
 function assertEvidenceComplete(e: Partial<TaskEvidence>): void {
   if (!e.fileListing || !e.fileListing.trim()) throw new EvidenceIncompleteError('fileListing is empty');
   if (!e.fileExcerpt || !e.fileExcerpt.trim()) throw new EvidenceIncompleteError('fileExcerpt is empty');
@@ -337,8 +369,8 @@ function assertEvidenceComplete(e: Partial<TaskEvidence>): void {
 // Producer submits evidence → 'awaiting_review'. THIS is the gate: a submission
 // with any missing evidence part is rejected and the task does not move. The
 // submitter becomes the recorded owner if none was set.
-export async function submitTask(
-  client: UpstashClient,
+export async function submitTaskWithStores(
+  stores: PersistenceStores,
   code: string,
   id: string,
   submitter: { name: string; client: ClientKind },
@@ -348,7 +380,7 @@ export async function submitTask(
   // Validate before touching Redis so a bad submission fails fast.
   assertEvidenceComplete(evidence);
   let updated: Task;
-  const board = await casTaskBoard(client, code, (current) => {
+  const board = await stores.taskBoards.mutateTaskBoard(code, (current) => {
     const task = findTask(current, id);
     const fullEvidence: TaskEvidence = {
       fileListing: evidence.fileListing,
@@ -370,6 +402,17 @@ export async function submitTask(
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
   return { board, task: updated! };
+}
+
+export async function submitTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  submitter: { name: string; client: ClientKind },
+  evidence: Omit<TaskEvidence, 'submittedBy' | 'submittedClient' | 'at'>,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  return submitTaskWithStores(createUpstashPersistenceStores(client), code, id, submitter, evidence, now);
 }
 
 // Light "ready for review" path for marker-driven hosted-agent rooms: the
@@ -408,8 +451,8 @@ export async function submitForReview(
 //   - the task is awaiting review (you cannot verify thin air);
 //   - the caller is not the owner (no self-verification, ever);
 //   - if a verifier is designated, the caller must be that verifier.
-export async function verifyTask(
-  client: UpstashClient,
+export async function verifyTaskWithStores(
+  stores: PersistenceStores,
   code: string,
   id: string,
   verifier: { name: string; client: ClientKind },
@@ -418,7 +461,7 @@ export async function verifyTask(
   now: number = Date.now(),
 ): Promise<{ board: TaskBoard; task: Task }> {
   let updated: Task;
-  const board = await casTaskBoard(client, code, (current) => {
+  const board = await stores.taskBoards.mutateTaskBoard(code, (current) => {
     const task = findTask(current, id);
     if (task.state !== 'awaiting_review') {
       throw new TaskStateError(`Task ${id} is '${task.state}', not 'awaiting_review' — nothing to verify. The producer must submit evidence first.`);
@@ -447,6 +490,18 @@ export async function verifyTask(
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
   return { board, task: updated! };
+}
+
+export async function verifyTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  verifier: { name: string; client: ClientKind },
+  verdict: 'done' | 'rejected',
+  note: string | undefined,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  return verifyTaskWithStores(createUpstashPersistenceStores(client), code, id, verifier, verdict, note, now);
 }
 
 // Edit a task's mutable fields and/or correct its scope. This is the path the

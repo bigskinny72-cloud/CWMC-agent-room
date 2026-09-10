@@ -9,9 +9,8 @@ import {
 import type { UpstashClient } from './client.js';
 import type { PersistenceStores } from '@agent-room/persistence';
 import { createUpstashPersistenceStores } from './persistenceStores.js';
-import { createUpstashSweepClaimStore } from './sweepClaimStore.js';
 import { ConcurrencyError } from './errors.js';
-import { casRoom } from './rooms.js';
+import { casRoomWithStores } from './rooms.js';
 
 // Turn state for a room. Lives in its own Redis key (`turn-state:{code}`) so
 // the room JSON stays small and the high-write turn cursor (currentName /
@@ -684,24 +683,6 @@ export function pickDeputyModerator(
     .sort((a, b) => a.joinedAt - b.joinedAt)[0];
 }
 
-// Idempotency claim for a dead-end transition (moderator timed out / left, or
-// sequential Lead left). Concurrent sweeps that observe the SAME dead-end must
-// only emit ONE skip + handoff/fallback notice; without this, two coalesced
-// listen polls each post the notice, which surfaced in prod as duplicate
-// "skipping … slot" + "handing the floor"/"falling back to open" spam. The
-// `identity` is derived purely from `prev` (the absent role + the deadline that
-// lapsed), so every racer computes the same key and exactly one SET NX wins.
-// TTL is short — it only needs to outlive the window in which coalesced polls
-// fire (seconds); a fresh dead-end later (new deadline) yields a new key.
-// Returns true iff THIS caller won and should emit.
-async function claimDeadEndNotice(
-  client: UpstashClient,
-  code: string,
-  identity: string,
-): Promise<boolean> {
-  return createUpstashSweepClaimStore(client).acquireSweepClaim(code, identity);
-}
-
 // Lazy timeout sweep, called from the long-poll loop in apps/mcp/src/tools.ts
 // (and any future external watchers). Reads turnState, applies the timeout
 // cascade, writes the new state if anything changed, and returns the list
@@ -723,13 +704,13 @@ async function claimDeadEndNotice(
 // `spoken.at` being monotonically advanced: a second writer who lost the
 // race will append duplicates only if both fired at the exact same ms,
 // which is rare and self-healing on the next read.
-export async function sweepTimeouts(
-  client: UpstashClient,
+export async function sweepTimeoutsWithStores(
+  stores: PersistenceStores,
   code: string,
   room: Room,
   now: number = Date.now(),
 ): Promise<SweepResult> {
-  const prev = await getTurnState(client, code);
+  const prev = await getTurnStateWithStores(stores, code);
   if (!prev) return { state: null, skipped: [] };
 
   // Step 1: cascade any expired deadlines.
@@ -779,8 +760,8 @@ export async function sweepTimeouts(
       // loser suppresses them (state already converges via the winner's
       // write). Best-effort: if the lock client errors, fall through and emit
       // (a rare duplicate beats a silently-dropped handoff notice).
-      const claimed = await claimDeadEndNotice(
-        client, code,
+      const claimed = await stores.sweepClaims.acquireSweepClaim(
+        code,
         `mod:${prev.moderatorName}:${prev.moderatorClient}:${prev.deadline ?? 'none'}`,
       ).catch(() => true);
       if (!claimed) return { state, skipped: [] };
@@ -800,7 +781,7 @@ export async function sweepTimeouts(
           modeConfig: { ...room.modeConfig, moderatorAgentName: deputy.name, moderatorAgentClient: deputy.client },
         };
         try {
-          await casRoom(client, code, (current) => ({
+          await casRoomWithStores(stores, code, (current) => ({
             ...current,
             replyMode: 'moderator',
             modeConfig: { ...current.modeConfig, moderatorAgentName: deputy.name, moderatorAgentClient: deputy.client },
@@ -808,7 +789,7 @@ export async function sweepTimeouts(
         } catch { /* best-effort — local promotedRoom still drives the turn */ }
         const newTurn = newModeratorTurn(promotedRoom, now, now);
         if (newTurn) {
-          try { await setTurnState(client, code, newTurn); } catch { /* best-effort */ }
+          try { await setTurnStateWithStores(stores, code, newTurn); } catch { /* best-effort */ }
           return {
             state: newTurn,
             skipped,
@@ -839,8 +820,8 @@ export async function sweepTimeouts(
       // Same concurrency dedupe as the moderator dead-end: only one racer emits
       // the lead-left fallback notice. Loser suppresses (state converges via the
       // winner's room CAS + turn clear below).
-      const claimed = await claimDeadEndNotice(
-        client, code,
+      const claimed = await stores.sweepClaims.acquireSweepClaim(
+        code,
         `lead:${prev.leadName}:${prev.leadClient}:${prev.deadline ?? 'none'}`,
       ).catch(() => true);
       if (!claimed) return { state, skipped: [] };
@@ -859,26 +840,35 @@ export async function sweepTimeouts(
     // converge on the next setReplyMode call. We catch errors so a
     // sweep failure never breaks the listen loop.
     try {
-      await casRoom(client, code, (current) => ({
+      await casRoomWithStores(stores, code, (current) => ({
         ...current,
         replyMode: 'open',
         // Keep modeConfig so the host can flip back later without
         // re-entering Lead/Moderator details.
       }));
     } catch { /* best-effort */ }
-    try { await clearTurnState(client, code); } catch { /* best-effort */ }
+    try { await clearTurnStateWithStores(stores, code); } catch { /* best-effort */ }
     return { state: null, skipped, fallback };
   }
 
   // Persist whatever the timeout cascade produced.
   if (skipped.length > 0) {
     if (state) {
-      await setTurnState(client, code, state);
+      await setTurnStateWithStores(stores, code, state);
     } else {
-      await clearTurnState(client, code);
+      await clearTurnStateWithStores(stores, code);
     }
   }
   return { state, skipped };
+}
+
+export async function sweepTimeouts(
+  client: UpstashClient,
+  code: string,
+  room: Room,
+  now: number = Date.now(),
+): Promise<SweepResult> {
+  return sweepTimeoutsWithStores(createUpstashPersistenceStores(client), code, room, now);
 }
 
 // Host-driven force-skip of the current speaker. Used by the
@@ -888,14 +878,14 @@ export async function sweepTimeouts(
 // Returns the skipped speaker (if any) so the caller can post the sys
 // event. If no turn is in flight, returns null and the caller should
 // surface a "nothing to skip" hint.
-export async function hostSkipCurrent(
-  client: UpstashClient,
+export async function hostSkipCurrentWithStores(
+  stores: PersistenceStores,
   code: string,
   room: Room,
   now: number = Date.now(),
 ): Promise<TurnSpokenEntry | null> {
   let skipped: TurnSpokenEntry | null = null;
-  await casTurnState(client, code, (prev) => {
+  await casTurnStateWithStores(stores, code, (prev) => {
     if (!prev || !prev.currentName || !prev.currentClient || !prev.currentRole) {
       return prev;
     }
@@ -911,20 +901,29 @@ export async function hostSkipCurrent(
   return skipped;
 }
 
+export async function hostSkipCurrent(
+  client: UpstashClient,
+  code: string,
+  room: Room,
+  now: number = Date.now(),
+): Promise<TurnSpokenEntry | null> {
+  return hostSkipCurrentWithStores(createUpstashPersistenceStores(client), code, room, now);
+}
+
 // Host-only one-shot direct invoke. Adds (target, source) to the
 // hostDirected allowlist on the active turnState. If no turn is in
 // flight, no-ops (returns false). Slice C wires the room_direct_invoke
 // MCP tool to this. Source determines roleAtSend on consume:
 // 'host' → 'host_directed', 'moderator' → 'assignee'.
-export async function directInvoke(
-  client: UpstashClient,
+export async function directInvokeWithStores(
+  stores: PersistenceStores,
   code: string,
   target: { name: string; client: ClientKind },
   source: 'host' | 'moderator',
   now: number = Date.now(),
 ): Promise<boolean> {
   let added = false;
-  await casTurnState(client, code, (prev) => {
+  await casTurnStateWithStores(stores, code, (prev) => {
     if (!prev) return prev;
     const existing = prev.hostDirected ?? [];
     if (existing.some(e => e.name === target.name && e.client === target.client)) {
@@ -937,6 +936,16 @@ export async function directInvoke(
     };
   });
   return added;
+}
+
+export async function directInvoke(
+  client: UpstashClient,
+  code: string,
+  target: { name: string; client: ClientKind },
+  source: 'host' | 'moderator',
+  now: number = Date.now(),
+): Promise<boolean> {
+  return directInvokeWithStores(createUpstashPersistenceStores(client), code, target, source, now);
 }
 
 // Resolve the role this participant currently plays in the active turn, if
