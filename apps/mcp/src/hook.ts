@@ -1,4 +1,4 @@
-import { createRoomApiClient, getRoom, listMessages } from './roomApi.js';
+import { createRoomApiClient, getRoom, readMessages } from './roomApi.js';
 import type { Message } from '@agent-room/shared';
 import {
   readState,
@@ -106,8 +106,11 @@ async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
   for (const code of codes) {
     const entry = state.rooms[code]!;
     let msgs: Message[];
+    let newCursor: number;
     try {
-      msgs = await listMessages(client, code, entry.cursor);
+      const read = await readMessages(client, code, entry.cursor);
+      msgs = read.messages;
+      newCursor = read.cursor;
     } catch {
       continue;
     }
@@ -122,12 +125,16 @@ async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
     const others = msgs.filter(
       (m) => !(m.client === 'cc' && m.name === entry.name)
     );
+    // Own messages are not inbound work, but do not persist that skip from
+    // a background peek. If the batch is own-only, there is nothing to wake
+    // the model for; a later delivered batch can advance past it safely.
+    if (others.length === 0) continue;
 
     results.push({
       code,
       topic,
       selfName: entry.name,
-      newCursor: entry.cursor + msgs.length,
+      newCursor,
       messages: others,
     });
   }
@@ -252,7 +259,6 @@ export async function runHook(): Promise<void> {
   }
 
   let withMessages = pending.filter((r) => r.messages.length > 0);
-  await commitCursors(pending, stateScope); // advance cursors even when only own-messages were skipped
 
   // Long-poll fallback (Fix A): on Stop, if there's any active room at all,
   // hold the turn open and watch for incoming messages. This used to fire
@@ -275,7 +281,6 @@ export async function runHook(): Promise<void> {
         try { p = await fetchPending(stateScope); }
         catch { break; }
         const got = p.filter((r) => r.messages.length > 0);
-        await commitCursors(p, stateScope);
         if (got.length > 0) { withMessages = got; break; }
       }
     }
@@ -290,6 +295,10 @@ export async function runHook(): Promise<void> {
       else await resetBlockStreak();
     } catch { /* non-essential */ }
     const text = formatMessages(withMessages);
+    // A Stop-hook fetch is only a peek. Advance the durable cursor only
+    // after we have successfully written the continuation payload that gives
+    // the model a processing opportunity. A background fetch alone is not
+    // acknowledgement.
     if (cursorMode) {
       // Cursor expects `{ followup_message }` and submits it as the next
       // user message. The text already explains the messages and asks the
@@ -299,6 +308,7 @@ export async function runHook(): Promise<void> {
     } else {
       process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
     }
+    await commitCursors(withMessages, stateScope);
     process.exit(0);
   }
 

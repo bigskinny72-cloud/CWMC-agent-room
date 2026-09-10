@@ -943,7 +943,7 @@ export function registerTools(server: Server) {
       }
 
       if (shouldAutoWatch) {
-        startRoomWatcher(code, a.name, msgs.length);
+        startRoomWatcher(code, a.name, initialRead.cursor);
       }
       return ok({
         code,
@@ -1089,7 +1089,7 @@ export function registerTools(server: Server) {
       }
 
       if (shouldAutoWatch) {
-        startRoomWatcher(a.code, finalName, msgs.length);
+        startRoomWatcher(a.code, finalName, initialRead.cursor);
       }
       return ok({
         code: a.code,
