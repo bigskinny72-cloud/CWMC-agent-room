@@ -18,6 +18,7 @@ Options:
   --prompt <text>   Prompt text (required)
   --agent <path>    Path/command for Cursor agent binary (default: agent)
   --timeout-ms <n>  Kill the session after N ms (default: 180000)
+  --allow-once      Permit only ACP allow_once requests for this invocation
 `);
   process.exit(exitCode);
 }
@@ -29,6 +30,7 @@ function parseArgs(argv) {
     prompt: null,
     agent: "agent",
     timeoutMs: 180_000,
+    allowOnce: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -38,6 +40,7 @@ function parseArgs(argv) {
     else if (a === "--prompt") out.prompt = argv[++i];
     else if (a === "--agent") out.agent = argv[++i];
     else if (a === "--timeout-ms") out.timeoutMs = Number(argv[++i]);
+    else if (a === "--allow-once") out.allowOnce = true;
     else {
       console.error(`Unknown argument: ${a}`);
       usage(1);
@@ -206,7 +209,20 @@ rl.on("line", (line) => {
 
   if (msg.method === "session/request_permission") {
     // Conservative default: never auto-bypass. No --yolo / allow-always.
-    respond(msg.id, { outcome: { outcome: "selected", optionId: "reject-once" } });
+    // Log the offered permission shape so a future scoped policy can select
+    // only explicitly understood options; unknown requests remain rejected.
+    console.error(
+      `[acp-bridge] permission-request ${JSON.stringify(msg.params ?? {})}`,
+    );
+    const options = msg.params?.options;
+    const allowOnce = Array.isArray(options)
+      ? options.find((option) => option?.kind === "allow_once")
+      : null;
+    const optionId = args.allowOnce && allowOnce?.optionId
+      ? allowOnce.optionId
+      : "reject-once";
+    console.error(`[acp-bridge] permission-decision ${optionId}`);
+    respond(msg.id, { outcome: { outcome: "selected", optionId } });
     return;
   }
 
