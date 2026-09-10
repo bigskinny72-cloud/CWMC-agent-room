@@ -128,6 +128,16 @@ export async function appendMessageWithStores(
     return { appended: true, metadata };
   }
 
+  // SQLite can provide a cross-store transaction boundary. Re-enter once
+  // without that capability so the existing turn/message logic runs unchanged
+  // inside one transaction; Redis/Upstash keeps the existing path.
+  if (stores.runInTransaction) {
+    const { runInTransaction, ...transactionStores } = stores;
+    return runInTransaction(() =>
+      appendMessageWithStores(transactionStores, code, message, kind),
+    );
+  }
+
   // Non-open mode: validate and advance turn state atomically.
   // `casTurnState`'s mutator is synchronous and may throw NotYourTurnError
   // to reject — casTurnState re-throws non-Concurrency errors, which we

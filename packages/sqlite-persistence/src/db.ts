@@ -279,6 +279,37 @@ export function getDb(): Database.Database {
 }
 
 /**
+ * Run async work inside one SQLite transaction that stays open across awaits.
+ *
+ * Must not use better-sqlite3's synchronous `db.transaction(async () => …)`
+ * wrapper — that commits when the async function returns a Promise, before
+ * awaited work finishes. Manual BEGIN/COMMIT/ROLLBACK keeps the boundary
+ * open for the full async fn. Nested `db.transaction()` calls become
+ * SAVEPOINTs under this outer transaction.
+ */
+export async function runInTransaction<T>(
+  fn: () => Promise<T>,
+): Promise<T> {
+  const conn = getDb();
+
+  if (conn.inTransaction) {
+    return fn();
+  }
+
+  conn.exec('BEGIN IMMEDIATE');
+  try {
+    const result = await fn();
+    conn.exec('COMMIT');
+    return result;
+  } catch (err) {
+    if (conn.inTransaction) {
+      conn.exec('ROLLBACK');
+    }
+    throw err;
+  }
+}
+
+/**
  * Get the current database path.
  */
 export function getDbPath(): string | null {

@@ -1,4 +1,5 @@
 import type { PersistenceStores } from '@agent-room/persistence';
+import { runInTransaction } from './db.js';
 import { sqliteRoomStore } from './roomStore.js';
 import { createSqliteMessageStore } from './messageStore.js';
 import { createSqliteReportStore } from './reportStore.js';
@@ -16,5 +17,6 @@ export function createSqlitePersistenceStores(): PersistenceStores {
     webhooks: createSqliteWebhookStore(),
     reports: createSqliteReportStore(),
     sweepClaims: createSqliteSweepClaimStore(),
+    runInTransaction,
   };
 }

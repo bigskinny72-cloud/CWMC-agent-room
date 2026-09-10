@@ -14,4 +14,11 @@ export interface PersistenceStores {
   webhooks: WebhookStore;
   reports: ReportStore;
   sweepClaims: SweepClaimStore;
+  /**
+   * Optional multi-store atomic boundary.
+   *
+   * SQLite backends implement this so callers can await work while a single
+   * transaction stays open. Redis/Upstash omit it.
+   */
+  runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
 }
