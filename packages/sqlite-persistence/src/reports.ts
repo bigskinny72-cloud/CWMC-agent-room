@@ -50,10 +50,13 @@ export function getStoredRoomReport(
   }
 
   if (row.expiresAt <= now) {
+    // Delete only the exact expired version we observed. A concurrent report
+    // refresh may replace this row between SELECT and DELETE; deleting by code
+    // alone would incorrectly remove that fresh report.
     db.prepare(`
       DELETE FROM reports
-      WHERE code = ?
-    `).run(code);
+      WHERE code = ? AND expiresAt = ? AND expiresAt <= ?
+    `).run(code, row.expiresAt, now);
 
     return null;
   }
