@@ -12,6 +12,12 @@ import type { Message } from '@agent-room/shared';
  * getMessageTotalCount returns null when the backend has no absolute
  * counter for the room, preserving legacy-room compatibility.
  */
+export interface MessageReadResult {
+  messages: Message[];
+  /** Absolute lifetime cursor immediately after this read snapshot. */
+  cursor: number;
+}
+
 export interface MessageStore {
   appendMessage(
     code: string,
@@ -23,6 +29,12 @@ export interface MessageStore {
     code: string,
     fromIndex: number,
   ): Promise<Message[]>;
+
+  /** Optional authoritative read + cursor snapshot for durable backends. */
+  readMessages?(
+    code: string,
+    fromIndex: number,
+  ): Promise<MessageReadResult>;
 
   getMessageTotalCount(
     code: string,

@@ -4,6 +4,7 @@ import type { MessageStore } from '@agent-room/persistence';
 import {
   appendStoredMessage,
   listStoredMessages,
+  readStoredMessages,
   getMessageTotalCount,
 } from './messages.js';
 
@@ -22,6 +23,10 @@ export function createSqliteMessageStore(): MessageStore {
       fromIndex: number,
     ): Promise<Message[]> {
       return listStoredMessages(code, fromIndex);
+    },
+
+    async readMessages(code: string, fromIndex: number) {
+      return readStoredMessages(code, fromIndex);
     },
 
     async getMessageTotalCount(

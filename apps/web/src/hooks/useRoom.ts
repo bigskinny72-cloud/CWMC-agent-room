@@ -9,10 +9,10 @@ import {
 } from '@agent-room/shared';
 import {
   getRoom,
-  listMessages,
+  readMessages,
   appendMessage,
   updatePresence,
-  getMessageTotalCount,
+
 } from '../lib/roomApi.js';
 
 interface UseRoomState {
@@ -53,7 +53,9 @@ export function useRoom(code: string, selfName: string) {
     const startedAt = Date.now();
     console.debug(traceTag, 'pullMessages.fire', { cursor: cursor.current, t: startedAt });
     try {
-      const fresh = await listMessages(code, cursor.current);
+      const read = await readMessages(code, cursor.current);
+      const fresh = read.messages;
+      const total = read.cursor;
       console.debug(traceTag, 'pullMessages.fetched', {
         fresh: fresh.length,
         ms: Date.now() - startedAt,
@@ -66,11 +68,11 @@ export function useRoom(code: string, selfName: string) {
         // the server's absolute counter (network race / earlier bug /
         // clock skew), every future poll returns [] forever. Detect
         // and reset.
-        const total = await getMessageTotalCount(code);
-        if (total !== null && cursor.current > total) {
+        if (cursor.current > total) {
           cursor.current = 0;
-          const recover = await listMessages(code, 0);
-          cursor.current = total;
+          const recovery = await readMessages(code, 0);
+          const recover = recovery.messages;
+          cursor.current = recovery.cursor;
           setState(s => {
             const seen = new Set(s.messages.map(m => m.id));
             const deduped = recover.filter(m => !seen.has(m.id));
@@ -92,8 +94,7 @@ export function useRoom(code: string, selfName: string) {
       // Setting cursor.current = total enforces "we've now seen exactly
       // what the server has" regardless of how the local arithmetic went.
       // Two concurrent polls will both write the same value → no drift.
-      const total = await getMessageTotalCount(code);
-      cursor.current = total ?? (cursor.current + fresh.length);
+      cursor.current = total;
       setState(s => {
         const seen = new Set(s.messages.map(m => m.id));
         const deduped = fresh.filter(m => !seen.has(m.id));
@@ -140,14 +141,12 @@ export function useRoom(code: string, selfName: string) {
   const forceRefresh = useCallback(async () => {
     cursor.current = 0;
     try {
-      const [r, fresh, total] = await Promise.all([
+      const [r, read] = await Promise.all([
         getRoom(code),
-        listMessages(code, 0),
-        getMessageTotalCount(code),
+        readMessages(code, 0),
       ]);
-      // Match server-side logical cursor (counter) so polling stays correct after LTRIM; legacy rooms fall back.
-      cursor.current = total ?? fresh.length;
-      setState({ room: r, messages: fresh, error: null });
+      cursor.current = read.cursor;
+      setState({ room: r, messages: read.messages, error: null });
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }

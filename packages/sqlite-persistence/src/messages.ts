@@ -94,11 +94,12 @@ export function appendStoredMessage(
  * If the caller has fallen behind far enough that older messages have
  * already been trimmed, return the oldest surviving message onward.
  */
-export function listStoredMessages(
+export function readStoredMessages(
   code: string,
   fromIndex: number,
-): Message[] {
+): { messages: Message[]; cursor: number } {
   const db = getDb();
+  return db.transaction(() => {
 
   const countRow = db.prepare(`
     SELECT totalCount
@@ -113,12 +114,11 @@ export function listStoredMessages(
   `).get(code) as { retainedCount: number };
 
   const retainedCount = retainedRow.retainedCount;
+  const totalCount = countRow?.totalCount ?? retainedCount;
 
   if (retainedCount === 0) {
-    return [];
+    return { messages: [], cursor: totalCount };
   }
-
-  const totalCount = countRow?.totalCount ?? retainedCount;
   const trimmed = totalCount - retainedCount;
 
   let start = fromIndex - trimmed;
@@ -128,7 +128,7 @@ export function listStoredMessages(
   }
 
   if (start >= retainedCount) {
-    return [];
+    return { messages: [], cursor: totalCount };
   }
 
   const rows = db.prepare(`
@@ -139,7 +139,7 @@ export function listStoredMessages(
     LIMIT -1 OFFSET ?
   `).all(code, start) as Array<{ messageJson: string }>;
 
-  return rows.map(({ messageJson }) => {
+  const messages = rows.map(({ messageJson }) => {
     const message = JSON.parse(messageJson) as Message;
 
     // Match the Redis read-healing behavior for legacy/text-less messages.
@@ -149,6 +149,13 @@ export function listStoredMessages(
 
     return message;
   });
+
+  return { messages, cursor: totalCount };
+  })();
+}
+
+export function listStoredMessages(code: string, fromIndex: number): Message[] {
+  return readStoredMessages(code, fromIndex).messages;
 }
 
 /**

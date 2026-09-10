@@ -155,9 +155,12 @@ export async function joinRoom(
   return body;
 }
 
+export async function readMessages(client: RoomApiClient, code: string, since: number): Promise<{ messages: Message[]; cursor: number }> {
+  return client.post<{ messages: Message[]; cursor: number }>({ action: 'messages', code, cursor: since });
+}
+
 export async function listMessages(client: RoomApiClient, code: string, since: number): Promise<Message[]> {
-  const body = await client.post<{ messages: Message[] }>({ action: 'messages', code, cursor: since });
-  return body.messages;
+  return (await readMessages(client, code, since)).messages;
 }
 
 // Trigger the server-side turn-timeout sweep and return the current room.

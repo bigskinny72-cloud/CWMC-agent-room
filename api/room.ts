@@ -37,6 +37,7 @@ import {
 } from '@agent-room/upstash-client';
 import {
   listMessagesWithStores,
+  readMessagesWithStores,
   appendMessageWithStores,
   getMessageTotalCountWithStores,
 } from '@agent-room/upstash-client';
@@ -230,8 +231,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const messages = await listMessagesWithStores(stores, code, cursor);
-        res.status(200).json({ messages });
+        const result = await readMessagesWithStores(stores, code, cursor);
+        res.status(200).json(result);
         return;
       }
 

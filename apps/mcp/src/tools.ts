@@ -13,6 +13,7 @@ import {
   appendMessage,
   appendSystemMessage,
   listMessages,
+  readMessages,
   createRoomReport,
   setListenUntil,
   removeParticipant,
@@ -497,9 +498,10 @@ async function runRoomListenPoll(
         };
       }
     } catch { /* transient — keep listening */ }
-    const msgs = await listMessages(client, code, since);
+    const read = await readMessages(client, code, since);
+    const msgs = read.messages;
     if (msgs.length > 0) {
-      const cursor = since + msgs.length;
+      const cursor = read.cursor;
       await updateCursor(code, cursor);
       const attachmentCount = msgs.reduce(
         (acc: number, m: Message) => acc + (Array.isArray(m.attachments) ? m.attachments.length : 0),
@@ -1310,10 +1312,9 @@ export function registerTools(server: Server) {
 
     if (name === 'room_list_messages') {
       const since = typeof a.since === 'number' ? a.since : 0;
-      const msgs = await listMessages(client, a.code, since);
-      const cursor = since + msgs.length;
-      await updateCursor(a.code, cursor);
-      return ok({ messages: msgs, cursor });
+      const read = await readMessages(client, a.code, since);
+      await updateCursor(a.code, read.cursor);
+      return ok({ messages: read.messages, cursor: read.cursor });
     }
 
     if (name === 'room_export') {

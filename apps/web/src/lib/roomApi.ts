@@ -77,14 +77,12 @@ export async function joinRoom(
     priorIdentity: options?.priorIdentity,
   });
 }
-export async function listMessages(code: string, cursor: number): Promise<Message[]> {
-  const result = await roomApi<{ messages: Message[] }>({
-    action: 'messages',
-    code,
-    cursor,
-  });
+export async function readMessages(code: string, cursor: number): Promise<{ messages: Message[]; cursor: number }> {
+  return roomApi<{ messages: Message[]; cursor: number }>({ action: 'messages', code, cursor });
+}
 
-  return result.messages;
+export async function listMessages(code: string, cursor: number): Promise<Message[]> {
+  return (await readMessages(code, cursor)).messages;
 }
 
 export async function getMessageTotalCount(code: string): Promise<number | null> {

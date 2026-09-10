@@ -385,12 +385,24 @@ export async function appendSystemMessage(
 // LTRIM trims the head, so a list-index cursor would skip messages past
 // MAX_MESSAGES_PER_ROOM. The counter key + LLEN let us reconstruct where the
 // caller's next unread message actually lives in the (possibly trimmed) list.
+export async function readMessagesWithStores(
+  stores: PersistenceStores,
+  code: string,
+  fromIndex: number,
+): Promise<{ messages: Message[]; cursor: number }> {
+  if (stores.messages.readMessages) {
+    return stores.messages.readMessages(code, fromIndex);
+  }
+  const messages = await stores.messages.listMessages(code, fromIndex);
+  return { messages, cursor: fromIndex + messages.length };
+}
+
 export async function listMessagesWithStores(
   stores: PersistenceStores,
   code: string,
   fromIndex: number,
 ): Promise<Message[]> {
-  return stores.messages.listMessages(code, fromIndex);
+  return (await readMessagesWithStores(stores, code, fromIndex)).messages;
 }
 
 export async function listMessages(
