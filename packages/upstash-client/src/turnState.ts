@@ -710,6 +710,20 @@ export async function sweepTimeoutsWithStores(
   room: Room,
   now: number = Date.now(),
 ): Promise<SweepResult> {
+  if (stores.runInTransaction) {
+    return stores.runInTransaction(() =>
+      sweepTimeoutsCore(stores, code, room, now),
+    );
+  }
+  return sweepTimeoutsCore(stores, code, room, now);
+}
+
+async function sweepTimeoutsCore(
+  stores: PersistenceStores,
+  code: string,
+  room: Room,
+  now: number,
+): Promise<SweepResult> {
   const prev = await getTurnStateWithStores(stores, code);
   if (!prev) return { state: null, skipped: [] };
 
