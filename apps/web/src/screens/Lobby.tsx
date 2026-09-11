@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { HostNameTakenError, RoomNotFoundError } from '@agent-room/upstash-client';
 import { getRoom, joinRoom, verifyHostKey } from '../lib/roomApi.js';
 import type { Room } from '@agent-room/shared';
 import { ROOM_POLL_MS } from '@agent-room/shared';
@@ -55,7 +54,7 @@ export function Lobby() {
         await refresh();
       } catch (e) {
         if (cancelled) return;
-        if (e instanceof HostNameTakenError) {
+        if (e instanceof Error && e.name === 'HostNameTakenError') {
           // Wipe the bogus self entry and bounce to the Join page so they
           // can pick a different name.
           sessionStorage.removeItem(`room:${code}:self`);
@@ -63,7 +62,7 @@ export function Lobby() {
           setTimeout(() => navigate(`/j/${code}`, { replace: true }), 1500);
           return;
         }
-        setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e));
+        setErr(e instanceof Error && e.name === 'RoomNotFoundError' ? 'Room not found' : String(e));
       }
     }
 
@@ -72,7 +71,7 @@ export function Lobby() {
         const snapshot = await getRoom(code);
         if (!cancelled) setRoom(snapshot.room);
       } catch (e) {
-        if (!cancelled) setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e));
+        if (!cancelled) setErr(e instanceof Error && e.name === 'RoomNotFoundError' ? 'Room not found' : String(e));
       }
     }
 

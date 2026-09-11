@@ -9,7 +9,7 @@
   "scripts": {
     "test": "npm run test:api && npm -ws run test --if-present",
     "test:api": "vitest run api",
-    "build": "npm -ws run build --if-present",
+    "build": "npm -w packages/shared run build && npm -w packages/persistence run build && npm -w packages/sqlite-persistence run build && npm -w packages/upstash-client run build && npm -w apps/mcp run build && npm -w apps/web run build",
     "dev:web": "npm -w apps/web run dev"
   },
   "devDependencies": {
