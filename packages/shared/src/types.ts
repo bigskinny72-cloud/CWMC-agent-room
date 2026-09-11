@@ -8,6 +8,10 @@ export interface Participant {
   client: ClientKind;
   joinedAt: number;      // epoch ms
   lastSeenAt: number;    // epoch ms
+  // Stable per-lifecycle id (MCP/session). Optional so legacy rows still parse.
+  // Name collisions stay unique; this key is what reconnect uses to reclaim
+  // "Grandpa" instead of minting Grandpa (2), (3), …
+  identityKey?: string;
   listenUntil?: number;  // epoch ms — set by room_listen, expires naturally
   // Host approval gate. Undefined for participants joined before this field
   // existed (treated as legacy-approved). New joiners default to false until

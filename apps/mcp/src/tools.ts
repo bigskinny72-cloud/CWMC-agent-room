@@ -1,6 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import { buildRoomRetro, myRoleInTurn, summarizeBoard } from '@agent-room/upstash-client';
 import {
   createRoomApiClient,
@@ -911,25 +912,27 @@ export function registerTools(server: Server) {
         projectKey: typeof a.projectKey === 'string' ? a.projectKey : undefined,
       });
       const code = created.code;
+      const identityKey = randomUUID();
       const participant: Participant = {
         name: a.name,
         role: a.role ?? '',
         color: colorForName(a.name),
         initials: initialsFor(a.name),
         client: 'cc',
+        identityKey,
         joinedAt: Date.now(),
         lastSeenAt: Date.now(),
       };
       await joinRoom(client, code, participant, {
         hostKey: created.hostKey,
-        priorIdentity: { name: a.name, client: 'cc' },
+        priorIdentity: { name: a.name, client: 'cc', identityKey },
       });
       const initialRead = await readMessages(client, code, 0);
       const msgs = initialRead.messages;
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
-      await setRoom(code, { name: a.name, cursor: 0, joinedAt: Date.now(), hostKey: created.hostKey });
+      await setRoom(code, { name: a.name, identityKey, cursor: 0, joinedAt: Date.now(), hostKey: created.hostKey });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
@@ -975,15 +978,6 @@ export function registerTools(server: Server) {
     }
 
     if (name === 'room_join') {
-      const participant: Participant = {
-        name: a.name,
-        role: a.role ?? '',
-        color: colorForName(a.name),
-        initials: initialsFor(a.name),
-        client: 'cc',
-        joinedAt: Date.now(),
-        lastSeenAt: Date.now(),
-      };
       // If this MCP session previously created the room, we have a hostKey
       // stashed and can re-claim the host name on rejoin (refresh / restart).
       // Otherwise, joining as the host's display name is rejected server-side
@@ -994,13 +988,25 @@ export function registerTools(server: Server) {
       try {
         storedStateRoom = await readRoomStateForJoin(a.code, a.name);
       } catch { /* local state is optional; treat as fresh join */ }
+      const identityKey = storedStateRoom?.identityKey ?? randomUUID();
+      const participant: Participant = {
+        name: a.name,
+        role: a.role ?? '',
+        color: colorForName(a.name),
+        initials: initialsFor(a.name),
+        client: 'cc',
+        identityKey,
+        joinedAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
       const priorIdentity = storedStateRoom
-        ? { name: storedStateRoom.name, client: 'cc' as const }
+        ? { name: storedStateRoom.name, client: 'cc' as const, identityKey }
         : undefined;
       const reconnecting = Boolean(
         priorIdentity &&
         targetRoom.participants.some((p: Participant) =>
-          p.name === priorIdentity.name && p.client === priorIdentity.client
+          (p.identityKey && p.identityKey === identityKey)
+          || (p.name === priorIdentity.name && p.client === priorIdentity.client)
         )
       );
       let updated: Awaited<ReturnType<typeof joinRoom>>;
@@ -1040,7 +1046,7 @@ export function registerTools(server: Server) {
       }
       const initialRead = await readMessages(client, a.code, 0);
       const msgs = initialRead.messages;
-      await setRoom(a.code, { ...storedStateRoom, name: finalName, cursor: storedStateRoom?.cursor ?? 0, joinedAt: Date.now(), hostKey: storedStateRoom?.hostKey });
+      await setRoom(a.code, { ...storedStateRoom, name: finalName, identityKey, cursor: storedStateRoom?.cursor ?? 0, joinedAt: Date.now(), hostKey: storedStateRoom?.hostKey });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,

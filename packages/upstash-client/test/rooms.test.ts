@@ -412,4 +412,179 @@ describe('joinRoom', () => {
       expect(updated.participants).toHaveLength(3);
     });
   });
+
+  function stubLiveRooms(rooms: Record<string, Room>) {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const cmd = JSON.parse(String(init?.body)) as [string, string, string?];
+      const [op, key, payload] = cmd;
+      const code = String(key).replace(/^room:/, '');
+      if (op === 'GET') return mockResp({ result: JSON.stringify(rooms[code]) });
+      if (op === 'SET') {
+        rooms[code] = JSON.parse(String(payload)) as Room;
+        return mockResp({ result: 'OK' });
+      }
+      throw new Error(`unexpected ${op}`);
+    }));
+  }
+
+  function cc(name: string, extra: Partial<Room['participants'][number]> = {}): Room['participants'][number] {
+    return {
+      name, role: '', color: '#000', initials: name.slice(0, 2).toUpperCase(),
+      client: 'cc', joinedAt: 1, lastSeenAt: 1, canSpeak: true, ...extra,
+    };
+  }
+
+  it('reclaims one Grandpa identity across 20 reconnects without numbered duplicates', async () => {
+    const key = 'grandpa-lifecycle';
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [cc('host', { client: 'web', initials: 'HO' }), cc('Reviewer', { identityKey: 'other' })],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+
+    for (let i = 0; i < 20; i++) {
+      const updated = await joinRoom(client, 'A', {
+        ...cc('Grandpa', { identityKey: key, joinedAt: 100 + i, lastSeenAt: 100 + i, color: '#111', initials: 'GR' }),
+      }, { priorIdentity: { name: 'Grandpa', client: 'cc', identityKey: key } });
+      const grandpas = updated.participants.filter(p => p.name.startsWith('Grandpa'));
+      expect(grandpas).toHaveLength(1);
+      expect(grandpas[0]!.name).toBe('Grandpa');
+      expect(grandpas[0]!.identityKey).toBe(key);
+      expect(updated.participants.some(p => p.name === 'Reviewer' && p.identityKey === 'other')).toBe(true);
+    }
+    expect(rooms.A!.participants.filter(p => p.client === 'cc' && p.name === 'Reviewer')).toHaveLength(1);
+  });
+
+  it('collapses stale Grandpa / Grandpa (2) / Grandpa (3) of one identityKey to one Grandpa', async () => {
+    const key = 'grandpa-lifecycle';
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [
+          cc('Grandpa', { identityKey: key }),
+          cc('Grandpa (2)', { identityKey: key }),
+          cc('Grandpa (3)', { identityKey: key }),
+          cc('Reviewer', { identityKey: 'other' }),
+        ],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+    const updated = await joinRoom(client, 'A', {
+      ...cc('Grandpa', { identityKey: key, color: '#111', initials: 'GR', lastSeenAt: 50 }),
+    }, { priorIdentity: { name: 'Grandpa (2)', client: 'cc', identityKey: key } });
+
+    const grandpas = updated.participants.filter(p => p.name.startsWith('Grandpa'));
+    expect(grandpas).toHaveLength(1);
+    expect(grandpas[0]!.name).toBe('Grandpa');
+    expect(grandpas[0]!.identityKey).toBe(key);
+    expect(updated.participants.some(p => p.identityKey === 'other')).toBe(true);
+  });
+
+  it('drops stale numbered rows for the same identityKey without touching others', async () => {
+    const key = 'grandpa-lifecycle';
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [
+          cc('Grandpa (2)', { identityKey: key }),
+          cc('Grandpa (17)', { identityKey: key }),
+          cc('Grandpa', { identityKey: 'someone-else' }),
+        ],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+    const updated = await joinRoom(client, 'A', {
+      ...cc('Grandpa', { identityKey: key, color: '#111', initials: 'GR' }),
+    }, { priorIdentity: { name: 'Grandpa (17)', client: 'cc', identityKey: key } });
+
+    const mine = updated.participants.filter(p => p.identityKey === key);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.name).toBe('Grandpa (2)');
+    expect(updated.participants.some(p => p.identityKey === 'someone-else' && p.name === 'Grandpa')).toBe(true);
+  });
+
+  it('keeps two different identityKeys distinguishable when they ask for the same name', async () => {
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [cc('Grandpa', { identityKey: 'alpha' })],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+    const second = await joinRoom(client, 'A', {
+      ...cc('Grandpa', { identityKey: 'beta', color: '#111', initials: 'GR' }),
+    }, { priorIdentity: { name: 'Grandpa', client: 'cc', identityKey: 'beta' } });
+    expect(second.participant.name).toBe('Grandpa (2)');
+    expect(second.participants.filter(p => p.name === 'Grandpa' || p.name === 'Grandpa (2)')).toHaveLength(2);
+
+    const again = await joinRoom(client, 'A', {
+      ...cc('Grandpa', { identityKey: 'beta', color: '#111', initials: 'GR' }),
+    }, { priorIdentity: { name: 'Grandpa (2)', client: 'cc', identityKey: 'beta' } });
+    expect(again.participant.name).toBe('Grandpa (2)');
+    expect(again.participants.filter(p => p.identityKey === 'alpha')).toHaveLength(1);
+    expect(again.participants.filter(p => p.identityKey === 'beta')).toHaveLength(1);
+  });
+
+  it('does not let name+client priorIdentity reclaim a different keyed seat', async () => {
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [cc('Grandpa', { identityKey: 'alpha' }), cc('Keep', { identityKey: 'keep' })],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+    const updated = await joinRoom(client, 'A', {
+      ...cc('Grandpa', { color: '#111', initials: 'GR' }),
+    }, { priorIdentity: { name: 'Grandpa', client: 'cc' } });
+    expect(updated.participant.name).toBe('Grandpa (2)');
+    expect(updated.participants.find(p => p.identityKey === 'alpha')?.name).toBe('Grandpa');
+    expect(updated.participants.some(p => p.identityKey === 'keep')).toBe(true);
+  });
+
+  it('reconnect without canSpeak keeps a host mute on the established identity', async () => {
+    const key = 'muted-grandpa';
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [cc('Grandpa', { identityKey: key, canSpeak: false })],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+    const { canSpeak: _ignored, ...rest } = cc('Grandpa', { identityKey: key, color: '#111', initials: 'GR' });
+    const updated = await joinRoom(client, 'A', rest, {
+      priorIdentity: { name: 'Grandpa', client: 'cc', identityKey: key },
+    });
+    expect(updated.participant.canSpeak).toBe(false);
+    expect(updated.participants).toHaveLength(1);
+  });
+
+  it('does not reclaim Grandpa in another room', async () => {
+    const key = 'grandpa-lifecycle';
+    const rooms: Record<string, Room> = {
+      A: {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [cc('Grandpa', { identityKey: key })],
+      },
+      B: {
+        code: 'B', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [cc('Grandpa', { identityKey: 'room-b-other' }), cc('Keep', { identityKey: 'keep' })],
+      },
+    };
+    stubLiveRooms(rooms);
+    const client = createClient(ENV);
+    await joinRoom(client, 'A', {
+      ...cc('Grandpa', { identityKey: key, lastSeenAt: 500 }),
+    }, { priorIdentity: { name: 'Grandpa', client: 'cc', identityKey: key } });
+    expect(rooms.B!.participants).toHaveLength(2);
+    expect(rooms.B!.participants.some(p => p.identityKey === 'keep')).toBe(true);
+    expect(rooms.B!.participants.find(p => p.name === 'Grandpa')!.identityKey).toBe('room-b-other');
+  });
 });

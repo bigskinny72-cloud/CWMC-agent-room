@@ -158,9 +158,10 @@ function isCandidateSeat(p: Participant, createdBy: string): boolean {
   return p.client === 'web' && p.name !== createdBy;
 }
 
-// Identity is (name, client). Same name + same client from the same logical
-// session is idempotent (browser refresh / agent reconnect just refreshes
-// presence). Two important rules layered on top:
+// Identity is (identityKey) when present, otherwise (name, client). Same
+// name + same client from the same logical session is idempotent (browser
+// refresh / agent reconnect just refreshes presence). Two important rules
+// layered on top:
 //
 // 1. Host-name lock: if `participant.name === room.createdBy`, the caller
 //    must present the matching `hostKey`. Without it, we throw
@@ -181,7 +182,7 @@ export interface JoinRoomOptions {
   // state). When provided AND it matches an existing participant, that row
   // gets updated in place. Without it, the join is treated as fresh and
   // collisions get suffixed.
-  priorIdentity?: { name: string; client: 'web' | 'cc' };
+  priorIdentity?: { name: string; client: 'web' | 'cc'; identityKey?: string };
   // Authenticated Clerk user id. When it matches room.ownerId, join reclaims
   // the host slot under the canonical createdBy name and evicts stale host rows.
   authedUserId?: string | null;
@@ -202,11 +203,24 @@ function isPriorIdentity(
   p: Participant,
   priorIdentity: JoinRoomOptions['priorIdentity'],
 ): boolean {
-  return Boolean(
-    priorIdentity
-    && p.client === priorIdentity.client
-    && namesEqualIgnoreCase(p.name, priorIdentity.name),
-  );
+  if (!priorIdentity) return false;
+  // A keyed row is only the caller's seat when the keys match. Name+client
+  // must not reclaim a different established identityKey.
+  if (p.identityKey) {
+    return Boolean(priorIdentity.identityKey && p.identityKey === priorIdentity.identityKey);
+  }
+  return p.client === priorIdentity.client
+    && namesEqualIgnoreCase(p.name, priorIdentity.name);
+}
+
+function sameLifecycleRow(
+  p: Participant,
+  next: Participant,
+  priorIdentity: JoinRoomOptions['priorIdentity'],
+): boolean {
+  if (isPriorIdentity(p, priorIdentity)) return true;
+  if (next.identityKey && p.identityKey === next.identityKey) return true;
+  return p.name === next.name && p.client === next.client;
 }
 
 function uniqueNameForRoom(
@@ -250,6 +264,9 @@ export async function joinRoomWithStores(
   let outParticipant = participant;
   const room = await casRoomWithStores(stores, code, (current) => {
     let next = { ...participant };
+    if (!next.identityKey && options.priorIdentity?.identityKey) {
+      next = { ...next, identityKey: options.priorIdentity.identityKey };
+    }
     const isOwnerReclaim = Boolean(
       options.authedUserId && current.ownerId && options.authedUserId === current.ownerId,
     );
@@ -295,35 +312,36 @@ export async function joinRoomWithStores(
       color: uniqueColorForRoom(next.color, current, options.priorIdentity),
     };
 
-    // Default canSpeak: TRUE for everyone (host, agents, walk-ins). The
-    // earlier "host approves new joiners" gate added too much friction —
-    // someone joining a fast-moving conversation had to wait for the host
-    // to notice and click ✓ before they could even ack a message. Robin's
-    // new framing: "进入都自动允许发言 但是只有主持人才可以关闭某个参会
-    // 的 agent 或着 web 的发言也就是静音". Same Slack/Zoom mental model.
-    //
-    // Once joined, the host can mute (canSpeak → false) any participant
-    // via setMuted(); muted participants stay in the room (presence intact,
-    // can read) but room_send is rejected by appendMessage's findSpeaker
-    // gate. Unmute is just setMuted(..., false) flipping it back.
+    const existing = current.participants.find(p =>
+      isPriorIdentity(p, options.priorIdentity) || Boolean(next.identityKey && p.identityKey === next.identityKey),
+    );
+    if (existing) {
+      next = {
+        ...next,
+        identityKey: next.identityKey ?? existing.identityKey ?? options.priorIdentity?.identityKey,
+        joinedAt: existing.joinedAt,
+        canSpeak: next.canSpeak ?? existing.canSpeak,
+      };
+    } else if (!next.identityKey && options.priorIdentity?.identityKey) {
+      next = { ...next, identityKey: options.priorIdentity.identityKey };
+    }
+
+    // Default canSpeak AFTER restoring the existing row so a reconnect that
+    // omits the field cannot unmute a host-muted participant.
     if (next.canSpeak === undefined) {
       next = { ...next, canSpeak: true };
     }
-    // Assigned AFTER the canSpeak materialization so the returned
-    // `outParticipant` reflects the final stored row, including its
-    // approval state (callers like the MCP room_join handler look at this
-    // to tell the agent whether it can speak immediately).
+
     outParticipant = next;
 
-    // Replace priorIdentity / same (name, client). On host reclaim, also
-    // drop every stale web row that matches createdBy case-insensitively
-    // so "Robin" + "robin" never coexist with a wrong Host badge.
+    // Replace priorIdentity / same lifecycle / same (name, client). On host
+    // reclaim, also drop every stale web row that matches createdBy
+    // case-insensitively so "Robin" + "robin" never coexist with a wrong Host badge.
     const keep = current.participants.filter(p => {
       if (isClaimingHost && p.client === 'web' && namesEqualIgnoreCase(p.name, current.createdBy)) {
         return false;
       }
-      if (isPriorIdentity(p, options.priorIdentity)) return false;
-      return !(p.name === next.name && p.client === next.client);
+      return !sameLifecycleRow(p, next, options.priorIdentity);
     });
 
     return { ...current, participants: [...keep, next] };

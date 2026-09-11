@@ -227,7 +227,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const code = body.code as string;
         const participant = body.participant as Participant;
         const hostKey = body.hostKey as string | undefined;
-        const priorIdentity = body.priorIdentity as { name: string; client: ClientKind } | undefined;
+        const priorIdentity = body.priorIdentity as { name: string; client: ClientKind; identityKey?: string } | undefined;
 
         if (!code || !participant) {
           res.status(400).json({ error: 'InvalidRequest', message: 'Missing code or participant' });
@@ -241,14 +241,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (priorIdentity) {
           requiredString(priorIdentity.name, 'priorIdentity.name');
           clientKind(priorIdentity.client);
+          if (priorIdentity.identityKey !== undefined) {
+            requiredString(priorIdentity.identityKey, 'priorIdentity.identityKey');
+          }
         }
         // A prior identity can evict the host row even when the new name differs.
         if (isHostName(participant.name) || (priorIdentity && isHostName(priorIdentity.name))) {
           await verifyHostClaimWithStores(stores, code, { hostKey: optionalString(hostKey, 'hostKey') });
         }
-        const prior = room.participants.find(p => priorIdentity
-          && p.client === priorIdentity.client
-          && p.name.trim().toLowerCase() === priorIdentity.name.trim().toLowerCase());
+        const prior = room.participants.find(p => {
+          if (!priorIdentity) return false;
+          if (p.identityKey) {
+            return Boolean(priorIdentity.identityKey && p.identityKey === priorIdentity.identityKey);
+          }
+          return p.client === priorIdentity.client
+            && p.name.trim().toLowerCase() === priorIdentity.name.trim().toLowerCase();
+        });
         const result = await joinRoomWithStores(stores, code, {
           ...participant, canSpeak: prior?.canSpeak ?? true,
         }, { hostKey, priorIdentity });

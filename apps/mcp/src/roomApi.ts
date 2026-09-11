@@ -138,7 +138,7 @@ export async function joinRoom(
   // Canonical shared context + policy (PRD §2.6) — the same text hosted
   // agents get in their system prompt. Present on servers ≥ the parity
   // release; older servers just omit them.
-  options: { hostKey?: string; priorIdentity?: { name: string; client: 'web' | 'cc' } } = {},
+  options: { hostKey?: string; priorIdentity?: { name: string; client: 'web' | 'cc'; identityKey?: string } } = {},
 ): Promise<Room & { participant: Participant; agentContext?: string; roomPolicy?: string; policyVersion?: number }> {
   const body = await client.post<Room & {
     participant: Participant;

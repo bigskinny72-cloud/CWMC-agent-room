@@ -27,6 +27,7 @@ function currentHarnessStateFile(): string | null {
 
 export interface RoomState {
   name: string;
+  identityKey?: string;
   cursor: number;
   pendingDelivery?: { id: string; cursor: number };
   acknowledgedDelivery?: string;
@@ -93,6 +94,7 @@ export function mergeStates(states: AgentRoomState[]): AgentRoomState {
         joinedAt: newest.joinedAt,
         lastSentAt: Math.max(existing.lastSentAt ?? 0, room.lastSentAt ?? 0) || undefined,
         hostKey: newest.hostKey ?? existing.hostKey,
+        identityKey: newest.identityKey ?? existing.identityKey,
       };
     }
   }
@@ -122,16 +124,51 @@ export async function readMergedState(): Promise<AgentRoomState> {
   return mergeStates(states);
 }
 
-export async function readRoomStateForJoin(code: string, desiredName: string): Promise<RoomState | undefined> {
-  const current = (await readState()).rooms[code];
+function storedNameMatchesJoin(storedName: string, desiredName: string): boolean {
+  if (storedName === desiredName) return true;
+  const base = storedName.replace(/ \((\d+)\)$/, '');
+  return base === desiredName;
+}
+
+function newestRoomState(rooms: RoomState[]): RoomState {
+  return [...rooms].sort((a, b) => b.joinedAt - a.joinedAt)[0]!;
+}
+
+/** Pick prior room state for a join. Same identityKey may be recovered from a
+ *  numbered stale name. Distinct keys that only share a display-name family
+ *  are left unmatched. */
+export function selectRoomStateForJoin(
+  current: RoomState | undefined,
+  others: RoomState[],
+  desiredName: string,
+): RoomState | undefined {
   if (current) return current;
 
+  const lineage = others.filter((room) => storedNameMatchesJoin(room.name, desiredName));
+  if (lineage.length === 0) return undefined;
+
+  const keyed = lineage.filter((room): room is RoomState & { identityKey: string } => Boolean(room.identityKey));
+  const uniqueKeys = new Set(keyed.map((room) => room.identityKey));
+  if (uniqueKeys.size > 1) return undefined;
+  if (uniqueKeys.size === 1) {
+    if (lineage.some((room) => !room.identityKey)) return undefined;
+    return newestRoomState(keyed);
+  }
+
+  if (lineage.length === 1) return lineage[0];
+  const exact = lineage.filter((room) => room.name === desiredName);
+  if (exact.length > 0 && exact.length === lineage.length) return newestRoomState(exact);
+  return undefined;
+}
+
+export async function readRoomStateForJoin(code: string, desiredName: string): Promise<RoomState | undefined> {
+  const current = (await readState()).rooms[code];
   const files = await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
-  return states
+  const others = states
     .map((state) => state.rooms[code])
-    .filter((room): room is RoomState => Boolean(room && room.name === desiredName))
-    .sort((a, b) => b.joinedAt - a.joinedAt)[0];
+    .filter((room): room is RoomState => Boolean(room));
+  return selectRoomStateForJoin(current, others, desiredName);
 }
 
 export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
@@ -165,29 +202,70 @@ async function writeState(state: AgentRoomState): Promise<void> {
 // writers both read the same snapshot and the second write silently drops the
 // first one's update (lost cursor advance → replayed/missed messages; lost
 // blockStreak bump → the autonomous-loop cap stops working). `mkdir` is atomic
-// on every platform, so an empty lock directory is the mutex; a stale lock
-// (holder crashed) is stolen after LOCK_STALE_MS — hook processes live for
-// seconds, so 5s is generous.
+// on every platform, so an empty lock directory is the mutex. A dead owner
+// (recorded pid no longer alive) is stolen immediately. A lock with no owner
+// file is stolen only after LOCK_STALE_MS so a live mkdir-before-write is not
+// taken. Live owners are never stolen.
 const LOCK_DIR = join(STATE_DIR, '.state-lock');
+const LOCK_OWNER_FILE = join(LOCK_DIR, 'owner.json');
 const LOCK_STALE_MS = 5_000;
 const LOCK_RETRY_MS = 25;
 const LOCK_MAX_TRIES = 40; // ~1s worst case, then fail without writing
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // EPERM/EACCES: the process exists but this user cannot signal it.
+    if (code === 'EPERM' || code === 'EACCES') return true;
+    return false;
+  }
+}
+
+async function releaseStateLock(): Promise<void> {
+  await fs.rm(LOCK_DIR, { recursive: true, force: true }).catch(() => { /* already released */ });
+}
+
+async function stealDeadStateLock(): Promise<void> {
+  try {
+    const raw = await fs.readFile(LOCK_OWNER_FILE, 'utf8');
+    const owner = JSON.parse(raw) as { pid?: number };
+    const pid = Number(owner.pid);
+    if (Number.isInteger(pid) && pid > 0) {
+      if (isPidAlive(pid)) return;
+      await releaseStateLock();
+      return;
+    }
+    // Valid JSON but unusable pid: same as missing metadata — wait for stale.
+  } catch {
+    // Missing/corrupt owner file: only steal when the lock is stale so a
+    // live owner that has mkdir'd but not yet written owner.json is not taken.
+  }
+  try {
+    const st = await fs.stat(LOCK_DIR);
+    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+      await releaseStateLock();
+    }
+  } catch {
+    /* lock vanished */
+  }
+}
 
 async function acquireStateLock(): Promise<boolean> {
   for (let i = 0; i < LOCK_MAX_TRIES; i++) {
     try {
       await fs.mkdir(LOCK_DIR);
-      return true;
-    } catch {
       try {
-        const st = await fs.stat(LOCK_DIR);
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-          await fs.rmdir(LOCK_DIR).catch(() => { /* raced another stealer */ });
-          continue;
-        }
+        await fs.writeFile(LOCK_OWNER_FILE, JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+        return true;
       } catch {
-        continue; // lock vanished between mkdir and stat — retry immediately
+        await releaseStateLock();
       }
+    } catch {
+      await stealDeadStateLock();
       await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
     }
   }
@@ -202,7 +280,7 @@ async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
-    if (locked) await fs.rmdir(LOCK_DIR).catch(() => { /* already released */ });
+    if (locked) await releaseStateLock();
   }
 }
 
