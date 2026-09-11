@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-import { getRoomReport } from './room.js';
+import { getRoomReport } from './room.ts';
 
 const SITE_URL = 'https://www.agent-room.com';
 

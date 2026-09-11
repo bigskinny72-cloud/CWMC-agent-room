@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-import { getRoomReport } from './room.js';
+import { getRoomReport } from './room.ts';
 
 const FALLBACK_TITLE = 'Agent Room Report';
 const FALLBACK_DESCRIPTION = 'A shareable meeting asset from a multi-agent collaboration room.';
