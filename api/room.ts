@@ -47,6 +47,7 @@ import type {
   Message,
   ClientKind,
   ReplyModeConfig,
+  RoomWebhook,
 } from '@agent-room/shared';
 import { generateCode } from '@agent-room/shared';
 
@@ -97,6 +98,18 @@ async function requireHost(room: Room, name: string, hostKey: unknown): Promise<
   } catch {
     throw new NotHostError(name, room.createdBy);
   }
+}
+
+// Public reads and member/host mutations share the same room view. The hash
+// stays server-side; only creation adds the one-time host capability explicitly.
+function roomView<T extends Room>(room: T): Omit<T, 'hostKeyHash' | 'hostKey'> {
+  const { hostKeyHash, hostKey, ...view } = room as T & { hostKey?: string };
+  return view;
+}
+
+function webhookView(webhook: RoomWebhook): Omit<RoomWebhook, 'secret'> {
+  const { secret, ...view } = webhook;
+  return view;
 }
 
 // Server report renderers share the same authority as the JSON API.
@@ -165,7 +178,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           createdBy: requiredString(raw.createdBy, 'createdBy'),
         };
         const result = await createRoomWithStores(stores, input);
-        res.status(200).json(result);
+        res.status(200).json({ ...roomView(result), hostKey: result.hostKey });
         return;
       }
       case 'get': {
@@ -175,7 +188,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
         const room = await getRoomWithStores(stores, code);
-        res.status(200).json({ room });
+        res.status(200).json({ room: roomView(room) });
         return;
       }
 
@@ -188,8 +201,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           res.status(400).json({ error: 'InvalidRequest', message: 'Missing or invalid code, requesterName, targetName, or targetClient' });
           return;
         }
+        // Self/stale-self cleanup stays keyless, including an already absent row.
+        if (requesterName !== targetName) {
+          await requireHost(await getRoomWithStores(stores, code), requesterName, body.hostKey);
+        }
         const room = await removeParticipantWithStores(stores, code, requesterName, targetName, targetClient);
-        res.status(200).json({ room });
+        res.status(200).json({ room: roomView(room) });
         return;
       }
 
@@ -217,8 +234,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const result = await joinRoomWithStores(stores, code, participant, { hostKey, priorIdentity });
-        res.status(200).json(result);
+        requiredString(participant.name, 'participant.name');
+        clientKind(participant.client);
+        const room = await getRoomWithStores(stores, code);
+        const isHostName = (name: string) => name.trim().toLowerCase() === room.createdBy.trim().toLowerCase();
+        if (priorIdentity) {
+          requiredString(priorIdentity.name, 'priorIdentity.name');
+          clientKind(priorIdentity.client);
+        }
+        // A prior identity can evict the host row even when the new name differs.
+        if (isHostName(participant.name) || (priorIdentity && isHostName(priorIdentity.name))) {
+          await verifyHostClaimWithStores(stores, code, { hostKey: optionalString(hostKey, 'hostKey') });
+        }
+        const prior = room.participants.find(p => priorIdentity
+          && p.client === priorIdentity.client
+          && p.name.trim().toLowerCase() === priorIdentity.name.trim().toLowerCase());
+        const result = await joinRoomWithStores(stores, code, {
+          ...participant, canSpeak: prior?.canSpeak ?? true,
+        }, { hostKey, priorIdentity });
+        res.status(200).json(roomView(result));
         return;
       }
 
@@ -259,6 +293,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
+        if (message.type !== 'msg') throw new InvalidRequest('Use systemMessage for system messages');
+        const room = await getRoomWithStores(stores, code);
+        if (message.name === room.createdBy) await requireHost(room, message.name, body.hostKey);
         const result = await appendMessageWithStores(stores, code, message, kind);
         res.status(200).json({ result });
         return;
@@ -326,12 +363,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           } else if (swept.fallback) {
             await systemNotice(code, 'Reply mode fell back to open.', { eventType: 'moderator_fallback' });
           }
-          res.status(200).json({ room: await getRoomWithStores(stores, code) });
+          res.status(200).json({ room: roomView(await getRoomWithStores(stores, code)) });
         } else if (action === 'webhookList') {
-          res.status(200).json({ webhooks: await listRoomWebhooksWithStores(stores, code) });
+          res.status(200).json({ webhooks: (await listRoomWebhooksWithStores(stores, code)).map(webhookView) });
         } else if (action === 'webhookSet' || action === 'webhookDelete') {
           const name = requiredString(body.requesterName, 'requesterName');
           requireParticipant(room, name);
+          const hooks = await listRoomWebhooksWithStores(stores, code);
+          const identifier = requiredString(action === 'webhookSet' ? body.url : body.id, action === 'webhookSet' ? 'url' : 'id');
+          const affected = hooks.filter(h => h.url === identifier || (action === 'webhookDelete' && h.id === identifier));
+          if (name === room.createdBy || affected.some(h => h.registeredBy !== name)) {
+            await requireHost(room, name, body.hostKey);
+          }
           if (action === 'webhookSet') {
             const url = requiredString(body.url, 'url');
             let parsed: URL;
@@ -340,7 +383,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             const webhook = await registerRoomWebhookWithStores(stores, code, {
               url, registeredBy: name, secret: optionalString(body.secret, 'secret'),
             });
-            res.status(200).json({ webhook });
+            res.status(200).json({ webhook: webhookView(webhook) });
           } else {
             res.status(200).json({ removed: await unregisterRoomWebhookWithStores(stores, code, requiredString(body.id, 'id')) });
           }
@@ -387,10 +430,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           }
           if (action === 'end' || action === 'reactivate') {
             const updated = action === 'end' ? await endRoomWithStores(stores, code) : await reactivateRoomWithStores(stores, code);
-            res.status(200).json({ room: updated });
+            res.status(200).json({ room: roomView(updated) });
           } else if (action === 'setMuted') {
             if (typeof body.muted !== 'boolean') throw new InvalidRequest('Invalid muted');
-            res.status(200).json({ room: await setMutedWithStores(stores, code, name, requiredString(body.targetName, 'targetName'), clientKind(body.targetClient), body.muted) });
+            res.status(200).json({ room: roomView(await setMutedWithStores(stores, code, name, requiredString(body.targetName, 'targetName'), clientKind(body.targetClient), body.muted)) });
           } else if (action === 'setReplyMode') {
             if (!['open', 'sequential', 'moderator'].includes(String(body.mode))) throw new InvalidRequest('Invalid mode');
             const config = body.config === undefined ? undefined : object(body.config);
@@ -399,7 +442,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
               for (const key of ['leadAgentClient', 'moderatorAgentClient']) if (config[key] !== undefined) clientKind(config[key]);
               if (config.timeoutMs !== undefined && Object.values(object(config.timeoutMs)).some(v => typeof v !== 'number' || !Number.isFinite(v) || v < 0)) throw new InvalidRequest('Invalid timeoutMs');
             }
-            res.status(200).json({ room: await setReplyModeWithStores(stores, code, name, body.mode as 'open' | 'sequential' | 'moderator', config as ReplyModeConfig | undefined) });
+            res.status(200).json({ room: roomView(await setReplyModeWithStores(stores, code, name, body.mode as 'open' | 'sequential' | 'moderator', config as ReplyModeConfig | undefined)) });
           } else if (action === 'directInvoke') {
             const rawTarget = object(body.target);
             const target = { name: requiredString(rawTarget.name, 'target.name'), client: clientKind(rawTarget.client) };

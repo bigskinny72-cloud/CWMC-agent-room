@@ -70,7 +70,7 @@ export async function joinRoom(
     priorIdentity?: { name: string; client: ClientKind };
   },
 ): Promise<JoinRoomResult> {
-  return roomApi<JoinRoomResult>({
+  return hostRequest<JoinRoomResult>(code, participant.name, {
     action: 'join',
     code,
     participant,
@@ -99,7 +99,7 @@ export async function appendMessage(
   message: Message,
   kind: 'message' | 'status' = 'message',
 ): Promise<void> {
-  await roomApi<unknown>({
+  await hostRequest<unknown>(code, message.name, {
     action: 'send',
     code,
     message,
@@ -126,9 +126,10 @@ export async function removeParticipant(
   targetName: string,
   targetClient: 'web' | 'cc',
 ): Promise<Room> {
-  const result = await roomApi<{ room: Room }>({
-    action: 'remove-participant', code, requesterName, targetName, targetClient,
-  });
+  const payload = { action: 'remove-participant', code, requesterName, targetName, targetClient };
+  const result = await (requesterName === targetName
+    ? roomApi<{ room: Room }>(payload)
+    : hostRequest<{ room: Room }>(code, requesterName, payload));
   return result.room;
 }
 

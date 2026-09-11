@@ -8,6 +8,7 @@ import { removeParticipant } from '../apps/web/src/lib/roomApi';
 let handler: any;
 let temp: string;
 let originalPath = process.env.AGENT_ROOM_SQLITE_PATH;
+const keys = new Map<string, string>();
 async function request(body: unknown) {
   let status = 200;
   let result: any;
@@ -20,6 +21,8 @@ beforeAll(async () => {
   process.env.AGENT_ROOM_SQLITE_PATH = join(temp, 'test.sqlite');
   openDb(process.env.AGENT_ROOM_SQLITE_PATH, 'create');
   handler = (await import('./room')).default;
+  vi.stubGlobal('localStorage', { getItem: (key: string) => keys.get(key) ?? null });
+  vi.stubGlobal('sessionStorage', { getItem: () => null });
   vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
     expect(url).toBe('/api/room');
     const { status, result } = await request(JSON.parse(init.body as string));
@@ -35,7 +38,9 @@ afterAll(() => {
 });
 test('browser removal uses SQLite, preserves identity matching and existing guards', async () => {
   const code = 'REG-REM-001';
-  expect((await request({ action: 'create', input: { code, topic: 'Removal regression', createdBy: 'Host' } })).status).toBe(200);
+  const created = await request({ action: 'create', input: { code, topic: 'Removal regression', createdBy: 'Host' } });
+  expect(created.status).toBe(200);
+  keys.set(`room:${code}:hostKey`, created.result.hostKey);
   for (const client of ['cc', 'web']) {
     expect((await request({ action: 'join', code, participant: { name: 'Agent', client, role: 'member', canSpeak: true, joinedAt: 1, lastSeenAt: 1 } })).status).toBe(200);
   }

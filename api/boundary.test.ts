@@ -82,7 +82,7 @@ test('browser, MCP and shell create contracts return the authoritative room and 
   expect(shell.status).toBe(200);
   expect(shell.result.hostKey).toHaveLength(32);
   expect((await stores.rooms.getRoom(shell.result.code)).topic).toBe('Shell created');
-  expect((await mcp.removeParticipant(client, browser.code, 'Host', 'Reviewer', 'cc')).participants.map(p => p.name)).not.toContain('Reviewer');
+  expect((await mcp.removeParticipant(client, browser.code, 'Host', 'Reviewer', 'cc', browser.hostKey)).participants.map(p => p.name)).not.toContain('Reviewer');
 });
 
 test('browser host controls and MCP turn contracts mutate SQLite with host authorization', async () => {
@@ -148,7 +148,9 @@ test('shell webhook contracts persist registration, update and removal without R
   expect(created.status).toBe(200);
   const updated = await request({ ...payload, secret: 'replacement' });
   expect(updated.result.webhook.id).toBe(created.result.webhook.id);
-  expect((await request({ action: 'webhookList', code })).result.webhooks).toEqual(await stores.webhooks.listWebhooks(code));
+  expect((await request({ action: 'webhookList', code })).result.webhooks).toEqual(
+    (await stores.webhooks.listWebhooks(code)).map(({ secret, ...webhook }) => webhook),
+  );
   expect((await stores.webhooks.listWebhooks(code))[0].secret).toBe('replacement');
   expect((await request({ action: 'webhookDelete', code, requesterName: 'Agent', id: payload.url })).result.removed).toBe(true);
   expect(await stores.webhooks.listWebhooks(code)).toEqual([]);

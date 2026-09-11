@@ -1020,12 +1020,12 @@ export function registerTools(server: Server) {
           time: Date.now(),
         };
         try {
-          await appendMessage(client, a.code, greeting);
+          await appendMessage(client, a.code, greeting, storedStateRoom?.hostKey);
         } catch { /* greeting is nice-to-have; join/listen must still proceed */ }
       }
       const initialRead = await readMessages(client, a.code, 0);
       const msgs = initialRead.messages;
-      await setRoom(a.code, { name: finalName, cursor: initialRead.cursor, joinedAt: Date.now() });
+      await setRoom(a.code, { name: finalName, cursor: initialRead.cursor, joinedAt: Date.now(), hostKey: storedStateRoom?.hostKey });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,
