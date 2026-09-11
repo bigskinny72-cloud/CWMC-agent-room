@@ -25,6 +25,9 @@ export const PRESENCE_STALE_MS = 60000;
 // host can manually remove them.
 export const PRESENCE_DISCONNECTED_MS = 5 * 60 * 1000;
 
+export const WEBHOOK_FAIL_DROP = 20;
+export const WEBHOOK_DISPATCH_TIMEOUT_MS = 2500;
+
 // Avatar palette — indigo/pink/amber/violet/emerald/rose/sky/fuchsia
 export const AVATAR_PALETTE: readonly string[] = [
   '#5B6AFF',

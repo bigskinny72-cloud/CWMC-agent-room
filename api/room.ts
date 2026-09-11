@@ -25,6 +25,7 @@ import {
   registerRoomWebhookWithStores,
   listRoomWebhooksWithStores,
   unregisterRoomWebhookWithStores,
+  dispatchRoomWebhooksWithStores,
   NotParticipantError,
   RoomNotFoundError,
   HostNameTakenError,
@@ -49,7 +50,7 @@ import type {
   ReplyModeConfig,
   RoomWebhook,
 } from '@agent-room/shared';
-import { generateCode } from '@agent-room/shared';
+import { generateCode, participantHealth } from '@agent-room/shared';
 
 const sqlitePath = process.env.AGENT_ROOM_SQLITE_PATH;
 
@@ -188,7 +189,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
         const room = await getRoomWithStores(stores, code);
-        res.status(200).json({ room: roomView(room) });
+        const hooks = await listRoomWebhooksWithStores(stores, code);
+        res.status(200).json({
+          room: roomView(room),
+          presence: room.participants.map(p => participantHealth(p, hooks, Date.now())),
+        });
         return;
       }
 
@@ -305,6 +310,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const room = await getRoomWithStores(stores, code);
         if (message.name === room.createdBy) await requireHost(room, message.name, body.hostKey);
         const result = await appendMessageWithStores(stores, code, message, kind);
+        if (kind !== 'status') {
+          try {
+            await dispatchRoomWebhooksWithStores(stores, code, message, { kind });
+          } catch { /* dispatch failure must not drop the stored message */ }
+        }
         res.status(200).json({ result });
         return;
       }
@@ -390,6 +400,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             if (!['http:', 'https:'].includes(parsed.protocol)) throw new InvalidRequest('Invalid webhook protocol');
             const webhook = await registerRoomWebhookWithStores(stores, code, {
               url, registeredBy: name, secret: optionalString(body.secret, 'secret'),
+              identityKey: optionalString(body.identityKey, 'identityKey'),
             });
             res.status(200).json({ webhook: webhookView(webhook) });
           } else {

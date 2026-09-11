@@ -28,7 +28,7 @@ export function Lobby() {
           // Pre-flight: if we're claiming the host's display name, prove
           // we own the host key. Without this, anyone with the code could
           // pretend to be the host.
-          const room = await getRoom(code);
+          const { room } = await getRoom(code);
           if (self.name === room.createdBy) {
             // Read from localStorage (room-scoped, survives tab close) with
             // a sessionStorage fallback for hosts who created the room before
@@ -69,8 +69,8 @@ export function Lobby() {
 
     async function refresh() {
       try {
-        const r = await getRoom(code);
-        if (!cancelled) setRoom(r);
+        const snapshot = await getRoom(code);
+        if (!cancelled) setRoom(snapshot.room);
       } catch (e) {
         if (!cancelled) setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e));
       }

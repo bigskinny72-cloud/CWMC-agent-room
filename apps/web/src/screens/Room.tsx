@@ -8,7 +8,7 @@ import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
-import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
+import { artifactLabel, extractArtifacts, presenceLabel, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ParticipantHealth, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
 import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, type TurnState } from '../lib/roomApi.js';
 import { copyText } from '../lib/copy.js';
 import { templateById } from '../lib/templates.js';
@@ -44,7 +44,7 @@ export function Room() {
   useEffect(() => {
     if (!self) navigate(`/j/${code}`, { replace: true });
   }, [self, code, navigate]);
-  const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '');
+  const { room, presence: presenceRows, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '');
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [attachBusy, setAttachBusy] = useState(false);
@@ -795,7 +795,7 @@ export function Room() {
             <div className="flex-1 overflow-y-auto p-4">
               <div className="text-[10px] font-semibold uppercase text-ink-faint mb-1">Participants</div>
               <p className="mb-3 text-[10px] leading-relaxed text-ink-soft">
-                Listening = inside an active listen window. Disconnected = no heartbeat for 5+ min, likely the CLI session was killed without leaving cleanly — host can remove with the × button.
+                Listening = active listen window. Connected = recent heartbeat. Reachable = a wake transport is registered. Disconnected = roster only, with no connection or wake evidence.
               </p>
               <div className="space-y-2">
                 {room.participants.map(p => {
@@ -805,15 +805,11 @@ export function Room() {
                   const isMuted = p.canSpeak === false;
                   const canMuteToggle = isMeHost && !isSelf && !ended;
                   const canAsk = canConfigureReplyMode && p.client === 'cc' && !isMuted;
-                  const presence = participantPresence(p, now);
+                  const presence = participantPresence(p, presenceRows, now);
                   // Whole-row visual fade for participants who haven't been
                   // seen in a while — keeps the row legible but signals
                   // "probably gone" without screaming about it.
-                  const rowFade = presence.kind === 'idle'
-                    ? 'opacity-65'
-                    : presence.kind === 'disconnected'
-                      ? 'opacity-50'
-                      : '';
+                  const rowFade = presence.kind === 'disconnected' ? 'opacity-50' : '';
                   return (
                     <div
                       key={`${p.name}-${p.client}`}
@@ -1221,48 +1217,32 @@ function artifactTone(kind: ArtifactKind): string {
   }
 }
 
-function participantPresence(p: Participant, now: number) {
-  if (p.listenUntil && p.listenUntil > now) {
-    return {
-      kind: 'listening' as const,
-      label: 'Listening now',
-      detail: '',
-      className: 'text-emerald-700',
-      dotClassName: 'bg-emerald-500',
-    };
+function participantPresence(p: Participant, rows: ParticipantHealth[], now: number) {
+  const health = rows.find(h =>
+    (p.identityKey && h.identityKey === p.identityKey)
+    || (h.name === p.name && h.client === p.client),
+  );
+  const labeled = health
+    ? presenceLabel(health)
+    : presenceLabel({
+      name: p.name,
+      client: p.client,
+      member: true,
+      connected: false,
+      listening: false,
+      reachable: false,
+      wakeable: false,
+      disconnected: true,
+      processing: false,
+    });
+  if (labeled.kind === 'listening') {
+    return { ...labeled, className: 'text-emerald-700', dotClassName: 'bg-emerald-500' };
   }
-
-  if (now - p.lastSeenAt <= PRESENCE_STALE_MS) {
-    return {
-      kind: 'online' as const,
-      label: 'Online',
-      detail: p.client === 'cc' ? 'hook unknown' : '',
-      className: 'text-blue-700',
-      dotClassName: 'bg-blue-500',
-    };
+  if (labeled.kind === 'connected') {
+    return { ...labeled, className: 'text-blue-700', dotClassName: 'bg-blue-500' };
   }
-
-  // Past 5 minutes silent → almost certainly disconnected. Most common cause:
-  // a CLI agent (Cursor / Claude Code / Codex) was terminated by the user
-  // without calling room_leave, so the participant row stays in the room
-  // forever. The "Disconnected" label is a hint to the host that this
-  // participant is unlikely to come back, paired with the always-visible
-  // kick button so they can clean up in one click.
-  if (now - p.lastSeenAt > PRESENCE_DISCONNECTED_MS) {
-    return {
-      kind: 'disconnected' as const,
-      label: 'Disconnected',
-      detail: p.client === 'cc' ? 'host can remove' : '',
-      className: 'text-ink-faint',
-      dotClassName: 'bg-slate-400',
-    };
+  if (labeled.kind === 'reachable') {
+    return { ...labeled, className: 'text-violet-700', dotClassName: 'bg-violet-500' };
   }
-
-  return {
-    kind: 'idle' as const,
-    label: 'Idle',
-    detail: p.client === 'cc' ? 'not listening' : '',
-    className: 'text-ink-faint',
-    dotClassName: 'bg-slate-300',
-  };
+  return { ...labeled, className: 'text-ink-faint', dotClassName: 'bg-slate-400' };
 }

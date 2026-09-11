@@ -1,4 +1,4 @@
-import type { ClientKind, Message, Participant, Room, RoomReport, ReplyMode, ReplyModeConfig, TurnState, TurnSpokenEntry } from '@agent-room/shared';
+import type { ClientKind, Message, Participant, ParticipantHealth, Room, RoomReport, ReplyMode, ReplyModeConfig, TurnState, TurnSpokenEntry } from '@agent-room/shared';
 export type { TurnState } from '@agent-room/shared';
 
 export interface CreateRoomInput {
@@ -39,13 +39,13 @@ export async function createRoom(input: CreateRoomInput): Promise<CreateRoomResu
   });
 }
 
-export async function getRoom(code: string): Promise<Room> {
-  const result = await roomApi<{ room: Room }>({
+export async function getRoom(code: string): Promise<{ room: Room; presence: ParticipantHealth[] }> {
+  const result = await roomApi<{ room: Room; presence?: ParticipantHealth[] }>({
     action: 'get',
     code,
   });
 
-  return result.room;
+  return { room: result.room, presence: result.presence ?? [] };
 }
 
 export async function verifyHostKey(

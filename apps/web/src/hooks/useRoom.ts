@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Message, Room } from '@agent-room/shared';
+import type { Message, ParticipantHealth, Room } from '@agent-room/shared';
 import {
   HEARTBEAT_MS,
   MESSAGE_POLL_MS,
@@ -17,12 +17,13 @@ import {
 
 interface UseRoomState {
   room: Room | null;
+  presence: ParticipantHealth[];
   messages: Message[];
   error: string | null;
 }
 
 export function useRoom(code: string, selfName: string) {
-  const [state, setState] = useState<UseRoomState>({ room: null, messages: [], error: null });
+  const [state, setState] = useState<UseRoomState>({ room: null, presence: [], messages: [], error: null });
   const cursor = useRef(0);
 
   // In-flight guard with TIMEOUT escape hatch. Two failure modes we hit:
@@ -118,8 +119,8 @@ export function useRoom(code: string, selfName: string) {
 
   const pullRoom = useCallback(async () => {
     try {
-      const r = await getRoom(code);
-      setState(s => ({ ...s, room: r }));
+      const snapshot = await getRoom(code);
+      setState(s => ({ ...s, room: snapshot.room, presence: snapshot.presence }));
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }
@@ -141,12 +142,12 @@ export function useRoom(code: string, selfName: string) {
   const forceRefresh = useCallback(async () => {
     cursor.current = 0;
     try {
-      const [r, read] = await Promise.all([
+      const [snapshot, read] = await Promise.all([
         getRoom(code),
         readMessages(code, 0),
       ]);
       cursor.current = read.cursor;
-      setState({ room: r, messages: read.messages, error: null });
+      setState({ room: snapshot.room, presence: snapshot.presence, messages: read.messages, error: null });
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }
@@ -154,7 +155,7 @@ export function useRoom(code: string, selfName: string) {
 
   useEffect(() => {
     cursor.current = 0;
-    setState({ room: null, messages: [], error: null });
+    setState({ room: null, presence: [], messages: [], error: null });
 
     let msgTimer: ReturnType<typeof setInterval> | null = null;
     let roomTimer: ReturnType<typeof setInterval> | null = null;

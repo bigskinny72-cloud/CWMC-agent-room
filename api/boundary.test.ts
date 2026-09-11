@@ -72,7 +72,7 @@ afterAll(() => {
 
 test('browser, MCP and shell create contracts return the authoritative room and host key', async () => {
   const browser = await room('API-NEW-001');
-  expect((await web.getRoom(browser.code)).topic).toBe('Boundary regression');
+  expect((await web.getRoom(browser.code)).room.topic).toBe('Boundary regression');
   const created = await mcp.createRoom(client, { topic: 'MCP created', createdBy: 'MCP Host' });
   expect(created.code).toMatch(/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/);
   expect(created.hostKey).toHaveLength(32);

@@ -225,6 +225,7 @@ export interface MessageMetadata {
   // targetAgentName='Claude'. For timed_out events, the agent that timed out.
   targetAgentName?: string;
   targetAgentClient?: ClientKind;
+  targetIdentityKey?: string;
   // For skipped_by_host / timed_out events: who/what triggered the skip.
   skippedBy?: 'system' | 'host';
   // Sequential mode: set on a room_status heartbeat sent by the current
@@ -593,7 +594,22 @@ export interface RoomWebhook {
   id: string;
   url: string;
   registeredBy: string;
+  identityKey?: string;
   secret?: string;
   createdAt: number;
   failCount?: number;
+  lastDeliveredAt?: number;
+}
+
+export interface ParticipantHealth {
+  name: string;
+  client: ClientKind;
+  identityKey?: string;
+  member: true;
+  connected: boolean;
+  listening: boolean;
+  reachable: boolean;
+  wakeable: boolean;
+  disconnected: boolean;
+  processing: false;
 }

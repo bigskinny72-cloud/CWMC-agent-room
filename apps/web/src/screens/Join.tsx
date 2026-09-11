@@ -27,7 +27,7 @@ export function Join() {
     if (!isValidCode(dashed)) { setErr('Invalid code'); return; }
     setErr(null);
     getRoom(dashed)
-      .then(setRoom)
+      .then(({ room }) => setRoom(room))
       .catch(e => setErr(e instanceof Error && e.name === 'RoomNotFoundError' ? 'Room not found' : String(e)));
   }, [raw]);
 
