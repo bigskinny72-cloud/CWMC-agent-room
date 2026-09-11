@@ -3,8 +3,6 @@ import type { Message } from '@agent-room/shared';
 import {
   readState,
   readHarnessStateOrMerged,
-  updateCursor,
-  updateCursorEverywhere,
   bumpBlockStreak,
   bumpBlockStreakEverywhere,
   resetBlockStreak,
@@ -85,7 +83,7 @@ interface PendingRoom {
   code: string;
   topic: string;
   selfName: string;
-  newCursor: number;
+  cursor: number;
   messages: Message[];
 }
 
@@ -106,11 +104,9 @@ async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
   for (const code of codes) {
     const entry = state.rooms[code]!;
     let msgs: Message[];
-    let newCursor: number;
     try {
       const read = await readMessages(client, code, entry.cursor);
       msgs = read.messages;
-      newCursor = read.cursor;
     } catch {
       continue;
     }
@@ -134,7 +130,7 @@ async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
       code,
       topic,
       selfName: entry.name,
-      newCursor,
+      cursor: entry.cursor,
       messages: others,
     });
   }
@@ -152,6 +148,7 @@ function formatMessages(rooms: PendingRoom[]): string {
       ? `Room ${r.code} ("${r.topic}") — joined as "${r.selfName}":`
       : `Room ${r.code} — joined as "${r.selfName}":`;
     lines.push(header);
+    lines.push(`Retrieve for acknowledgement: room_listen({ code: "${r.code}", since: ${r.cursor}, timeoutMs: 0 })`);
     for (const m of r.messages) {
       const role = m.role ? ` (${m.role})` : '';
       lines.push(`  • ${m.name}${role}: ${m.text}`);
@@ -159,19 +156,9 @@ function formatMessages(rooms: PendingRoom[]): string {
     lines.push('');
   }
   lines.push(
-    'If a reply would move the discussion forward, call room_send. Otherwise, acknowledge silently — do not reply for the sake of replying.'
+    'This continuation is an unacknowledged preview. Call room_listen with timeoutMs: 0 to retrieve the recoverable batch and its deliveryId. After processing that batch, acknowledge its deliveryId using room_listen ack. Reply with room_send only if useful.'
   );
   return lines.join('\n');
-}
-
-async function commitCursors(rooms: PendingRoom[], scope: StateScope): Promise<void> {
-  for (const r of rooms) {
-    if (scope === 'harness') {
-      await updateCursorEverywhere(r.code, r.newCursor);
-    } else {
-      await updateCursor(r.code, r.newCursor);
-    }
-  }
 }
 
 async function readStdin(): Promise<HookInput> {
@@ -295,10 +282,8 @@ export async function runHook(): Promise<void> {
       else await resetBlockStreak();
     } catch { /* non-essential */ }
     const text = formatMessages(withMessages);
-    // A Stop-hook fetch is only a peek. Advance the durable cursor only
-    // after we have successfully written the continuation payload that gives
-    // the model a processing opportunity. A background fetch alone is not
-    // acknowledgement.
+    // Writing stdout does not prove the harness resumed the model. Only a
+    // subsequent explicit delivery acknowledgement may commit progress.
     if (cursorMode) {
       // Cursor expects `{ followup_message }` and submits it as the next
       // user message. The text already explains the messages and asks the
@@ -308,7 +293,6 @@ export async function runHook(): Promise<void> {
     } else {
       process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
     }
-    await commitCursors(withMessages, stateScope);
     process.exit(0);
   }
 

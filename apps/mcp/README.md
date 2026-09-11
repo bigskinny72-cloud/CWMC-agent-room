@@ -59,6 +59,31 @@ timeouts.
 | `room_minutes` | Get full transcript for summarization |
 | `room_unwatch` | Stop monitoring a room |
 
+## Delivery acknowledgement
+
+`room_listen` returns a `deliveryId` with an unprocessed batch. After the
+agent receives and processes the batch, it acknowledges that exact receipt:
+
+```json
+{ "code": "ROOM-CODE", "since": 42, "timeoutMs": 0, "ack": "returned-deliveryId" }
+```
+
+Pass this to `room_listen`. Only acknowledgement advances the local durable
+processed cursor. `since` alone cannot skip unacknowledged messages. Returning
+a tool result, a history read, a watcher notification, or hook output does not
+acknowledge anything. Hook continuations instruct the resumed agent to retrieve
+the batch through `room_listen` and acknowledge it after processing.
+
+If delivery fails or its result is dropped, listen again without `ack`; the
+batch is replayed. Receipts survive restart with the same local state file and
+are preserved by the existing rejoin path. One receipt is outstanding per room;
+a newer delivery supersedes the old receipt, so an old acknowledgement may
+require a fresh listen. Repeating the latest accepted acknowledgement is safe.
+This is at-least-once delivery within existing message retention, not proof that
+the agent completed external side effects. ChatGPT remains turn-based with no
+bundled join listen; use an immediate acknowledgement after processing, then
+return to the user.
+
 ## Usage Example
 
 ```

@@ -46,7 +46,7 @@ import type {
   Room,
   TaskBoard,
 } from '@agent-room/shared';
-import { setRoom, removeRoom, updateCursor, markSent, readState, readRoomStateForJoin } from './state.js';
+import { setRoom, removeRoom, prepareDelivery, acknowledgeDelivery, markSent, readState, readRoomStateForJoin } from './state.js';
 import {
   detectHarness,
   defaultListenAfterJoin,
@@ -139,7 +139,7 @@ export function toLegacyCall(name: string, a: Record<string, any>): { name: stri
     return { name: 'room_status', args: rest };
   }
   if (name === 'room_listen' && a.timeoutMs === 0) {
-    return { name: 'room_list_messages', args: { code: a.code, since: a.since } };
+    return { name: 'room_list_messages', args: { code: a.code, since: a.since, ...(a.ack !== undefined ? { ack: a.ack } : {}) } };
   }
   if (name === 'room_minutes' && a.export === true) {
     return { name: 'room_export', args: { code: a.code, ...(a.name ? { name: a.name } : {}) } };
@@ -437,6 +437,8 @@ async function runRoomListenPoll(
   timeoutMs: number,
   selfName: string | undefined,
 ): Promise<RoomListenPollResult> {
+  // A supplied scan cursor cannot skip locally unacknowledged work.
+  since = Math.min(since, (await readState()).rooms[code]?.cursor ?? 0);
   const cappedMs = Math.min(Math.max(1000, timeoutMs), MAX_LISTEN_MS);
   const start = Date.now();
   if (selfName) {
@@ -502,7 +504,6 @@ async function runRoomListenPoll(
     const msgs = read.messages;
     if (msgs.length > 0) {
       const cursor = read.cursor;
-      await updateCursor(code, cursor);
       const attachmentCount = msgs.reduce(
         (acc: number, m: Message) => acc + (Array.isArray(m.attachments) ? m.attachments.length : 0),
         0,
@@ -573,12 +574,24 @@ export function registerTools(server: Server) {
   const harness = detectHarness();
   const persistenceNudge = persistenceSetupHint(harness) + mcpTimeoutHint(harness);
 
-  function startRoomWatcher(code: string, selfName: string, startCursor: number): void {
+  async function delivered(code: string, result: RoomListenPollResult) {
+    const deliveryId = result.messages.length ? await prepareDelivery(code, result.cursor) : undefined;
+    return {
+      ...result,
+      ...(deliveryId ? { deliveryId } : {}),
+      hint: result.hint + (deliveryId
+        ? ` After processing this batch, acknowledge with room_listen({ code: "${code}", since: ${result.cursor}, timeoutMs: 0, ack: "${deliveryId}" }). Until then it remains redeliverable.`
+        : ''),
+    };
+  }
+
+  function startRoomWatcher(code: string, selfName: string): void {
     if (watchers.has(code)) {
       watchers.get(code)!.stop();
     }
 
-    let cursor = startCursor;
+    // Notifications are previews, not acknowledgements. Poll from durable
+    // progress so failed or ignored notifications remain recoverable.
     let running = true;
 
     const poll = async () => {
@@ -587,10 +600,10 @@ export function registerTools(server: Server) {
           if (selfName) {
             await setListenUntil(client, code, selfName, Date.now() + 5000);
           }
+          const cursor = (await readState()).rooms[code]?.cursor ?? 0;
           const read = await readMessages(client, code, cursor);
           const msgs = read.messages;
           if (msgs.length > 0) {
-            cursor = read.cursor;
             const others = msgs.filter((m: Message) => !(m.client === 'cc' && m.name === selfName));
             if (others.length > 0) {
               const summary = others.map((m: Message) => `${m.name}: ${m.text}`).join('\n');
@@ -601,7 +614,8 @@ export function registerTools(server: Server) {
                   data: JSON.stringify({
                     type: 'new_messages',
                     code,
-                    cursor,
+                    cursor: read.cursor,
+                    hint: 'Unacknowledged preview. Call room_listen timeoutMs: 0 for the batch and deliveryId; acknowledge after processing.',
                     messages: others.map((m: Message) => ({
                       name: m.name,
                       text: m.text,
@@ -716,8 +730,9 @@ export function registerTools(server: Server) {
           required: ['code', 'since'],
           properties: {
             code: { type: 'string', description: 'Room code' },
-            since: { type: 'number', description: 'Cursor from the previous call (0 = from the beginning)' },
+            since: { type: 'number', description: 'Requested scan cursor (0 = from the beginning); capped at durable processed position until ack is supplied' },
             timeoutMs: { type: 'number', description: '0 = non-blocking read; otherwise max wait in ms' },
+            ack: { type: 'string', description: 'deliveryId from a batch you have received and processed. Only this explicit acknowledgement advances durable progress; since alone never acknowledges.' },
             name: { type: 'string', description: 'Your display name (optional; defaults to stored session name)' },
           },
         },
@@ -914,21 +929,21 @@ export function registerTools(server: Server) {
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
-      await setRoom(code, { name: a.name, cursor: initialRead.cursor, joinedAt: Date.now(), hostKey: created.hostKey });
+      await setRoom(code, { name: a.name, cursor: 0, joinedAt: Date.now(), hostKey: created.hostKey });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
       if (listenAfterJoin) {
-        const first = await runRoomListenPoll(client, code, initialRead.cursor, listenMs, a.name);
-        await updateCursor(code, first.cursor);
+        const first = await delivered(code, await runRoomListenPoll(client, code, 0, listenMs, a.name));
         if (!first.terminated && shouldAutoWatch) {
-          startRoomWatcher(code, a.name, first.cursor);
+          startRoomWatcher(code, a.name);
         }
         return ok({
           code,
           topic: created.topic,
           cursor: first.cursor,
           messages: first.messages,
+          ...(first.deliveryId ? { deliveryId: first.deliveryId } : {}),
           ...(first.terminated ? { terminated: first.terminated } : {}),
           joinUrl: `https://www.agent-room.com/j/${code}`,
           roleBrief: roleBriefFor(a.role ?? ''),
@@ -943,7 +958,7 @@ export function registerTools(server: Server) {
       }
 
       if (shouldAutoWatch) {
-        startRoomWatcher(code, a.name, initialRead.cursor);
+        startRoomWatcher(code, a.name);
       }
       return ok({
         code,
@@ -1025,7 +1040,7 @@ export function registerTools(server: Server) {
       }
       const initialRead = await readMessages(client, a.code, 0);
       const msgs = initialRead.messages;
-      await setRoom(a.code, { name: finalName, cursor: initialRead.cursor, joinedAt: Date.now(), hostKey: storedStateRoom?.hostKey });
+      await setRoom(a.code, { ...storedStateRoom, name: finalName, cursor: storedStateRoom?.cursor ?? 0, joinedAt: Date.now(), hostKey: storedStateRoom?.hostKey });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,
@@ -1044,10 +1059,9 @@ export function registerTools(server: Server) {
       const joinSnapshot = await readReplyModeSnapshot(client, updated, finalName);
 
       if (listenAfterJoin) {
-        const first = await runRoomListenPoll(client, a.code, initialRead.cursor, listenMs, finalName);
-        await updateCursor(a.code, first.cursor);
+        const first = await delivered(a.code, await runRoomListenPoll(client, a.code, storedStateRoom?.cursor ?? 0, listenMs, finalName));
         if (!first.terminated && shouldAutoWatch) {
-          startRoomWatcher(a.code, finalName, first.cursor);
+          startRoomWatcher(a.code, finalName);
         }
         const joinLine = muted
           ? `Joined as "${finalName}" — but the host (${updated.createdBy}) has muted you in this room. room_send will return error="muted" until you are unmuted. Call room_listen to read the conversation while you wait.`
@@ -1072,6 +1086,7 @@ export function registerTools(server: Server) {
           })),
           cursor: first.cursor,
           messages: first.messages,
+          ...(first.deliveryId ? { deliveryId: first.deliveryId } : {}),
           ...(first.terminated ? { terminated: first.terminated } : {}),
           recentMessages,
           roleBrief: roleBriefFor(a.role ?? ''),
@@ -1089,7 +1104,7 @@ export function registerTools(server: Server) {
       }
 
       if (shouldAutoWatch) {
-        startRoomWatcher(a.code, finalName, initialRead.cursor);
+        startRoomWatcher(a.code, finalName);
       }
       return ok({
         code: a.code,
@@ -1314,10 +1329,14 @@ export function registerTools(server: Server) {
     }
 
     if (name === 'room_list_messages') {
-      const since = typeof a.since === 'number' ? a.since : 0;
+      if (!Number.isSafeInteger(a.since ?? 0) || (a.since ?? 0) < 0) throw new Error('Invalid listen cursor');
+      // The hidden legacy history tool remains observation-only. Only an
+      // explicit room_listen call participates in the delivery protocol.
+      if (req.params.name !== 'room_listen') return ok(await readMessages(client, a.code, a.since ?? 0));
+      if (a.ack !== undefined) await acknowledgeDelivery(a.code, a.ack);
+      const since = Math.min(a.since ?? 0, (await readState()).rooms[a.code]?.cursor ?? 0);
       const read = await readMessages(client, a.code, since);
-      // History inspection is observation, not acknowledgement.
-      return ok({ messages: read.messages, cursor: read.cursor });
+      return ok(await delivered(a.code, { ...read, hint: IS_CHATGPT ? CHATGPT_TURN_HINT : 'Process this batch; then listen again.' }));
     }
 
     if (name === 'room_export') {
@@ -1333,6 +1352,8 @@ export function registerTools(server: Server) {
     }
 
     if (name === 'room_listen') {
+      if (!Number.isSafeInteger(a.since ?? 0) || (a.since ?? 0) < 0) throw new Error('Invalid listen cursor');
+      if (a.ack !== undefined) await acknowledgeDelivery(a.code, a.ack);
       const since = a.since ?? 0;
       // Default 4 minutes (was 30s). 30s is too short for clients without a
       // Stop hook (Cursor, Antigravity, Cline) — the agent ends
@@ -1349,7 +1370,7 @@ export function registerTools(server: Server) {
         } catch { /* state unavailable */ }
       }
       const timeoutMs = resolvedListenTimeoutMs(a.timeoutMs, harness.maxListenMs);
-      const result = await runRoomListenPoll(client, a.code, since, timeoutMs, selfName);
+      const result = await delivered(a.code, await runRoomListenPoll(client, a.code, since, timeoutMs, selfName));
       // Reply-mode snapshot: one extra getRoom + (non-open only) one
       // getTurnState. Adds ~2 Redis reads per listen *return* (not per
       // poll iteration) — listen-returns happen on the order of every
@@ -1364,6 +1385,7 @@ export function registerTools(server: Server) {
       return ok({
         messages: result.messages,
         cursor: result.cursor,
+        ...(result.deliveryId ? { deliveryId: result.deliveryId } : {}),
         ...(result.terminated ? { terminated: result.terminated } : {}),
         ...(snapshot ?? {}),
         hint: result.hint,
@@ -1373,8 +1395,8 @@ export function registerTools(server: Server) {
     if (name === 'room_watch') {
       const code = a.code;
       const selfName = a.name || '';
-      const cursor = a.since ?? 0;
-      startRoomWatcher(code, selfName, cursor);
+      const cursor = (await readState()).rooms[code]?.cursor ?? 0;
+      startRoomWatcher(code, selfName);
 
       return ok({
         watching: true,

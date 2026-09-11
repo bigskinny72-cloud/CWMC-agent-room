@@ -184,19 +184,17 @@ describe('state harness files', () => {
 });
 
 describe('state lock', () => {
-  it('serializes concurrent updateCursor calls (no lost updates)', async () => {
+  it('serializes concurrent acknowledgement retries (no lost updates)', async () => {
     const dir = await makeStateDir('agent-room-state-lock-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CLAUDECODE', '');
     vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
 
-    const { setRoom, updateCursor, readMergedState } = await import('../src/state.js');
+    const { setRoom, prepareDelivery, acknowledgeDelivery, readMergedState } = await import('../src/state.js');
     await setRoom('AAA-BBB-CCC', { name: 'X', cursor: 0, joinedAt: 1 });
 
-    // Without the cross-process lock these all read cursor=0 concurrently and
-    // the last writer wins with an arbitrary value; with it they serialize and
-    // the monotonic guard lands on the maximum.
-    await Promise.all(Array.from({ length: 20 }, (_, i) => updateCursor('AAA-BBB-CCC', i + 1)));
+    const receipt = await prepareDelivery('AAA-BBB-CCC', 20);
+    await Promise.all(Array.from({ length: 20 }, () => acknowledgeDelivery('AAA-BBB-CCC', receipt)));
 
     const state = await readMergedState();
     expect(state.rooms['AAA-BBB-CCC']?.cursor).toBe(20);

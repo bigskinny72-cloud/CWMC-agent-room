@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Polls Upstash list room-msgs:{CODE} from a persisted cursor.
 // Exits immediately on first new message(s) OR after MAX_POLLS * POLL_MS.
-// Persists cursor so each next invocation picks up.
+// Observation only: never persist a processed cursor from watcher output.
+// Use MCP room_listen deliveryId/ack for recoverable processing progress.
 //
 // Usage: UPSTASH_REDIS_REST_URL=... UPSTASH_REDIS_REST_TOKEN=... CODE=XXX-XXX-XXX node watch-once.mjs
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -37,7 +38,6 @@ for (let i = 0; i < MAX_POLLS; i++) {
       console.log('[' + t + '] ' + arrow + ' ' + m.name + ': ' + m.text);
     }
     cursor += result.length;
-    writeFileSync(CURSOR_FILE, String(cursor));
     console.log('CURSOR=' + cursor);
     process.exit(0);
   }

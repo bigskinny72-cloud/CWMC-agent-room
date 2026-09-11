@@ -104,10 +104,12 @@ async function main() {
       check('Stop reason mentions other agent', typeof parsed?.reason === 'string' && parsed.reason.includes(otherName));
     }
 
-    // 2. Cursor advanced → next Stop produces no output
+    // 2. Output is not acknowledgement → next Stop redelivers
     {
       const r = await runHook({ hook_event_name: 'Stop', stop_hook_active: false });
-      check('Stop after consume → no stdout', r.stdout.trim() === '');
+      check('Stop without acknowledgement redelivers', JSON.parse(r.stdout).reason.includes(otherName));
+      const stateNow = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
+      check('Stop output leaves processed cursor unchanged', stateNow.rooms[code].cursor === 0);
     }
 
     // 3a. stop_hook_active=true + new messages + streak under cap → still blocks
@@ -222,7 +224,7 @@ async function main() {
       check('no-recent-send Stop emits nothing', r.stdout.trim() === '');
     }
 
-    // 6. Own messages should be filtered (still advance cursor)
+    // 6. Own messages should be filtered (without advancing the cursor)
     {
       const stateNow = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
       stateNow.rooms[code].cursor = 999; // past everything

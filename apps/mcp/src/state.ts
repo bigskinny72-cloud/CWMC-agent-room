@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { detectHarness } from './harness.js';
+import { randomUUID } from 'node:crypto';
 
 const STATE_DIR = process.env.AGENT_ROOM_STATE_DIR || join(homedir(), '.agent-room');
 
@@ -27,6 +28,8 @@ function currentHarnessStateFile(): string | null {
 export interface RoomState {
   name: string;
   cursor: number;
+  pendingDelivery?: { id: string; cursor: number };
+  acknowledgedDelivery?: string;
   joinedAt: number;
   lastSentAt?: number;
   // Stored when this MCP session is the host of the room (room_create).
@@ -168,7 +171,7 @@ async function writeState(state: AgentRoomState): Promise<void> {
 const LOCK_DIR = join(STATE_DIR, '.state-lock');
 const LOCK_STALE_MS = 5_000;
 const LOCK_RETRY_MS = 25;
-const LOCK_MAX_TRIES = 40; // ~1s worst case, then proceed unlocked
+const LOCK_MAX_TRIES = 40; // ~1s worst case, then fail without writing
 
 async function acquireStateLock(): Promise<boolean> {
   for (let i = 0; i < LOCK_MAX_TRIES; i++) {
@@ -188,14 +191,14 @@ async function acquireStateLock(): Promise<boolean> {
       await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
     }
   }
-  // Never deadlock the user's agent over a stuck lock — worst case we are
-  // back to the old (lossy but functional) unlocked behaviour for one call.
+  // A contended write must be retried; unlocked updates can erase receipts.
   return false;
 }
 
 async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
   await fs.mkdir(STATE_DIR, { recursive: true }).catch(() => { /* readState handles missing dir */ });
   const locked = await acquireStateLock();
+  if (!locked) throw new Error('Agent Room state is busy; retry without advancing');
   try {
     return await fn();
   } finally {
@@ -221,27 +224,39 @@ export async function removeRoom(code: string): Promise<void> {
   });
 }
 
-export async function updateCursor(code: string, cursor: number): Promise<void> {
-  await withStateLock(async () => {
+// ponytail: one outstanding receipt per room; overlapping deliveries may replay.
+// If parallel consumers become necessary, replace this slot with a receipt queue.
+export async function prepareDelivery(code: string, cursor: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('Invalid delivery cursor');
+  return withStateLock(async () => {
     const state = await readState();
     const room = state.rooms[code];
-    if (!room) return;
-    if (cursor <= room.cursor) return;
-    room.cursor = cursor;
+    if (!room || cursor <= room.cursor) return undefined;
+    const delivery = { id: randomUUID(), cursor };
+    room.pendingDelivery = delivery;
     await writeState(state);
+    return delivery.id;
   });
 }
 
-export async function updateCursorEverywhere(code: string, cursor: number): Promise<void> {
+export async function acknowledgeDelivery(code: string, id: unknown): Promise<void> {
+  if (typeof id !== 'string' || !id) throw new Error('Invalid delivery acknowledgement');
   await withStateLock(async () => {
-    const files = await listStateFiles();
-    await Promise.all(files.map(async (file) => {
-      const state = await readStateFile(file);
-      const room = state.rooms[code];
-      if (!room || cursor <= room.cursor) return;
-      room.cursor = cursor;
-      await writeStateFile(file, state);
-    }));
+    const state = await readState();
+    const room = state.rooms[code];
+    if (room?.acknowledgedDelivery === id) {
+      // Retry also finishes a harness mirror write interrupted after the
+      // scoped file committed. Hooks must see the acknowledged position.
+      await writeState(state);
+      return;
+    }
+    if (!room?.pendingDelivery || room.pendingDelivery.id !== id) {
+      throw new Error('Unknown or superseded delivery; listen again without ack to recover');
+    }
+    room.cursor = Math.max(room.cursor, room.pendingDelivery.cursor);
+    room.acknowledgedDelivery = id;
+    delete room.pendingDelivery;
+    await writeState(state);
   });
 }
 
