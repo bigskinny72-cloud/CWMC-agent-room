@@ -181,7 +181,7 @@ export function toLegacyCall(name: string, a: Record<string, any>): { name: stri
 
 // One-time etiquette for the whole server (clients surface it as system-level
 // guidance) — keeps the per-tool descriptions short.
-const IS_CHATGPT = detectHarness().kind === 'chatgpt';
+let IS_CHATGPT = detectHarness().kind === 'chatgpt';
 const CHATGPT_TURN_HINT = 'ChatGPT participation is turn-based: read available messages, post a useful response with room_send when permitted, then return to the user. Resume on a later user request.';
 
 export const STDIO_SERVER_INSTRUCTIONS = [
@@ -572,8 +572,25 @@ export function registerTools(server: Server) {
   // get an extra line telling them to run
   // `npx agent-room-mcp init`. Snapshotted because env vars don't change
   // mid-process and detection runs in O(branches).
-  const harness = detectHarness();
-  const persistenceNudge = persistenceSetupHint(harness) + mcpTimeoutHint(harness);
+  let harness = detectHarness();
+  let persistenceNudge = persistenceSetupHint(harness) + mcpTimeoutHint(harness);
+  let shouldAutoWatch = harness.kind === 'cursor' || harness.kind === 'copilot';
+
+  // Environment markers work for stdio clients, but a shared/remote MCP may
+  // serve ChatGPT without AGENT_ROOM_HARNESS being set. MCP initialization
+  // already tells us which client is connected, so use that identity as a
+  // per-connection fallback. This prevents ChatGPT from inheriting the long
+  // blocking-listen behavior intended for strong-loop clients.
+  function refreshHarnessFromClient(): void {
+    if (harness.kind !== 'unknown') return;
+    const info = server.getClientVersion?.();
+    const clientLabel = `${info?.name ?? ''} ${info?.version ?? ''}`;
+    if (!/chatgpt|openai/i.test(clientLabel)) return;
+    harness = detectHarness({ ...process.env, AGENT_ROOM_HARNESS: 'chatgpt' });
+    IS_CHATGPT = true;
+    persistenceNudge = persistenceSetupHint(harness) + mcpTimeoutHint(harness);
+    shouldAutoWatch = false;
+  }
 
   async function delivered(code: string, result: RoomListenPollResult) {
     const deliveryId = result.messages.length ? await prepareDelivery(code, result.cursor) : undefined;
@@ -641,7 +658,8 @@ export function registerTools(server: Server) {
   // Copilot joins Cursor here: neither has a stop hook, and Copilot's
   // chat.agent.maxRequests budget (default 25) makes listen-chaining a
   // guaranteed drop-out — the background watcher is its only persistence.
-  const shouldAutoWatch = harness.kind === 'cursor' || harness.kind === 'copilot';
+  // shouldAutoWatch is initialized above and refreshed if client identity
+  // reveals a remote ChatGPT connection.
 
   // Tool profiles. `core` trims the surface to the nine tools a guest agent
   // actually needs (create/join/send/status/listen/read/minutes/leave/end),
@@ -860,7 +878,8 @@ export function registerTools(server: Server) {
       },
   ];
 
-  if (harness.kind === 'chatgpt') {
+  function applyChatGPTToolSurface(): void {
+    if (harness.kind !== 'chatgpt') return;
     const descriptions: Record<string, string> = {
       "room_create": "Create a meeting room and join as host. Returns room information and cursor immediately, without a bundled listen. Read, respond if useful, then return to the user.",
       "room_join": "Join a room when the user asks. Returns room information, recent messages, assigned name, and cursor immediately, without a bundled listen. Read, respond if useful, then return to the user.",
@@ -880,13 +899,18 @@ export function registerTools(server: Server) {
     }
   }
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: activeProfile === 'core'
-      ? allTools.filter((t) => CORE_PROFILE_TOOLS.has(t.name))
-      : allTools,
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    refreshHarnessFromClient();
+    applyChatGPTToolSurface();
+    return {
+      tools: activeProfile === 'core'
+        ? allTools.filter((t) => CORE_PROFILE_TOOLS.has(t.name))
+        : allTools,
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    refreshHarnessFromClient();
     // Consolidated names (room_task, room_admin, room_send kind=status, …)
     // translate onto the legacy dispatch branches below; legacy names pass
     // through untouched, so pre-consolidation callers keep working.

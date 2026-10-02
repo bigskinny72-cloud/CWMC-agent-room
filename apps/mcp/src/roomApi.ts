@@ -88,16 +88,25 @@ export function createRoomApiClient(): RoomApiClient {
   return {
     async post<T>(payload: Record<string, unknown>): Promise<T> {
       let resp: Response;
+      const configuredTimeout = Number(process.env.AGENT_ROOM_HTTP_TIMEOUT_MS ?? 15_000);
+      const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 15_000;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         resp = await fetch(endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
           cache: 'no-store',
+          signal: controller.signal,
         });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : 'network failure';
+        const msg = controller.signal.aborted
+          ? `request timed out after ${timeoutMs}ms`
+          : e instanceof Error ? e.message : 'network failure';
         throw new RoomApiError(`POST ${endpoint} failed: ${msg}`, 0);
+      } finally {
+        clearTimeout(timer);
       }
       const body = (await resp.json().catch(() => ({}))) as {
         error?: string;
