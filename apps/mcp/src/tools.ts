@@ -440,6 +440,21 @@ async function runRoomListenPoll(
 ): Promise<RoomListenPollResult> {
   // A supplied scan cursor cannot skip locally unacknowledged work.
   since = Math.min(since, (await readState()).rooms[code]?.cursor ?? 0);
+
+  // timeoutMs: 0 is a true non-blocking history read. Do not enter presence,
+  // room-state probing, polling, or sleep machinery: weak HTTP/MCP clients
+  // use this path specifically because they cannot hold a blocking call reliably.
+  if (timeoutMs === 0) {
+    const read = await readMessages(client, code, since);
+    return {
+      messages: read.messages,
+      cursor: read.cursor,
+      hint: IS_CHATGPT
+        ? String(read.messages.length) + ' new message(s). ' + CHATGPT_TURN_HINT
+        : String(read.messages.length) + ' new message(s). Non-blocking history read complete.',
+    };
+  }
+
   const cappedMs = Math.min(Math.max(1000, timeoutMs), MAX_LISTEN_MS);
   const start = Date.now();
   if (selfName) {
@@ -545,6 +560,7 @@ function resolvedListenTimeoutMs(raw: unknown, maxListenMs: number): number {
   // is the absolute ceiling; strong harnesses pass maxListenMs ≥ it.
   const cap = Math.min(MAX_LISTEN_MS, maxListenMs);
   if (typeof raw === 'number' && Number.isFinite(raw)) {
+    if (raw === 0) return 0;
     return Math.min(Math.max(1000, raw), cap);
   }
   return Math.min(DEFAULT_LISTEN_MS, cap);
